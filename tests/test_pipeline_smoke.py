@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timezone
-from unittest import mock
 
 from sqlalchemy import select, text, update
 
-from ml_etl import config as config_module
-from ml_etl.db import engine as engine_module
 from ml_etl.db import session_scope
 from ml_etl.db.models import EtlRejection, MarketCuratedProduct, MarketPriceObservation, MarketSnapshot
 from ml_etl.db.repository import table_counts
@@ -17,43 +13,11 @@ from ml_etl.domain.attributes import build_product_key, extract_attributes, pars
 from ml_etl.domain.buckets import bucket_key_for, previous_bucket_key, rank_band, trajectory_label
 from ml_etl.domain.canonical import canonicalize
 from ml_etl.domain.whitelist import classify_small_appliance
-from ml_etl.pipeline import orchestrator, run_pipeline
 from ml_etl.pipeline.offers import aggregate_offers, percentile
-from tests.fake_api import FakeMercadoLivreApi
-
-TARGET_CATEGORIES = ["MLB5726", "MLB432825"]
+from tests.support import PipelineTestCase
 
 
-class PipelineSmokeTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self._env = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(
-            {
-                "DB_BACKEND": "memory",
-                "ML_CLIENT_ID": "fake-client-id",
-                "ML_CLIENT_SECRET": "fake-client-secret",
-                "ETL_TARGET_CATEGORIES": ",".join(TARGET_CATEGORIES),
-                "ETL_SNAPSHOT_BUCKET": "month",
-                "ETL_MAX_WORKERS": "2",
-                "ETL_LOG_LEVEL": "CRITICAL",
-            }
-        )
-        config_module.reset_settings_cache()
-        engine_module.dispose_engine()
-        self.settings = config_module.load_settings(use_dotenv=False)
-        self.assertTrue(self.settings.database.is_memory, "a suite deve rodar apenas em memoria")
-
-    def tearDown(self) -> None:
-        engine_module.dispose_engine()
-        config_module.reset_settings_cache()
-        os.environ.clear()
-        os.environ.update(self._env)
-
-    def _run(self, **kwargs):
-        with mock.patch.object(orchestrator, "MercadoLivreApi", FakeMercadoLivreApi):
-            return run_pipeline(settings=self.settings, **kwargs)
-
+class PipelineSmokeTest(PipelineTestCase):
     @staticmethod
     def _curated_scores(session, bucket_key: str) -> dict[str, float]:
         rows = session.execute(
