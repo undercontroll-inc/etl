@@ -41,6 +41,13 @@ class TimestampMixin:
     )
 
 
+class SchemaPatch(Base):
+    __tablename__ = "schema_patch"
+
+    name: Mapped[str] = mapped_column(String(120), primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class EtlRun(Base):
     __tablename__ = "etl_run"
 

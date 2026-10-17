@@ -60,11 +60,11 @@ def get_session_factory(settings: Settings | None = None) -> sessionmaker[Sessio
 
 
 def init_schema(engine: Engine | None = None) -> None:
-    from ml_etl.db.models import Base
-    from ml_etl.db.views import create_views
+    from ml_etl.db.migrations import migrate
+    from ml_etl.db.views import create_views, drop_views_on
 
     target = engine or get_engine()
-    Base.metadata.create_all(target)
+    migrate(target, before_patches=drop_views_on)
     create_views(target)
     logger.info("Schema garantido em %s", target.dialect.name)
 

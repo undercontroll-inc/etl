@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
+
+from sqlalchemy import Connection, Engine, inspect, select, text
+
+from ml_etl.db.models import Base, SchemaPatch, utcnow
+from ml_etl.logging_config import get_logger
+
+logger = get_logger(__name__)
+
+
+@dataclass(frozen=True)
+class Patch:
+    name: str
+    postgres: tuple[str, ...] = ()
+    rebuild: tuple[str, ...] = ()
+    renames: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+
+    def apply(self, connection: Connection) -> None:
+        if connection.dialect.name == "postgresql":
+            for statement in self.postgres:
+                connection.execute(text(statement))
+            return
+        for table_name in self.rebuild:
+            rebuild_table(connection, table_name, self.renames.get(table_name, {}))
+
+
+PATCHES: tuple[Patch, ...] = ()
+
+
+def rebuild_table(connection: Connection, table_name: str, renames: Mapping[str, str] | None = None) -> None:
+    table = Base.metadata.tables[table_name]
+    if not inspect(connection).has_table(table_name):
+        table.create(connection)
+        return
+
+    renames = renames or {}
+    legacy = f"{table_name}__legacy"
+    old_columns = [column["name"] for column in inspect(connection).get_columns(table_name)]
+    for index_name in connection.execute(
+        text("SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = :table AND sql IS NOT NULL"),
+        {"table": table_name},
+    ).scalars().all():
+        connection.execute(text(f'DROP INDEX "{index_name}"'))
+
+    connection.exec_driver_sql("PRAGMA legacy_alter_table = ON")
+    try:
+        connection.exec_driver_sql(f'ALTER TABLE "{table_name}" RENAME TO "{legacy}"')
+    finally:
+        connection.exec_driver_sql("PRAGMA legacy_alter_table = OFF")
+    table.create(connection)
+
+    new_columns = {column.name for column in table.columns}
+    pairs = [(old, renames.get(old, old)) for old in old_columns if renames.get(old, old) in new_columns]
+    if pairs:
+        targets = ", ".join(f'"{new}"' for _, new in pairs)
+        sources = ", ".join(f'"{old}"' for old, _ in pairs)
+        connection.execute(text(f'INSERT INTO "{table_name}" ({targets}) SELECT {sources} FROM "{legacy}"'))
+    connection.execute(text(f'DROP TABLE "{legacy}"'))
+
+
+def pending_patches(connection: Connection, patches: tuple[Patch, ...] = PATCHES) -> list[Patch]:
+    applied = set(connection.execute(select(SchemaPatch.name)).scalars())
+    return [patch for patch in patches if patch.name not in applied]
+
+
+def _mark_applied(connection: Connection, patch: Patch) -> None:
+    connection.execute(SchemaPatch.__table__.insert().values(name=patch.name, applied_at=utcnow()))
+
+
+def migrate(
+    engine: Engine,
+    patches: tuple[Patch, ...] = PATCHES,
+    before_patches: Callable[[Connection], None] | None = None,
+) -> list[str]:
+    fresh = not inspect(engine).has_table("etl_run")
+    Base.metadata.create_all(engine)
+
+    applied: list[str] = []
+    with engine.connect() as connection:
+        sqlite = connection.dialect.name == "sqlite"
+        if sqlite:
+            connection.exec_driver_sql("PRAGMA foreign_keys = OFF")
+            connection.commit()
+        try:
+            with connection.begin():
+                pending = pending_patches(connection, patches)
+                if pending and not fresh and before_patches is not None:
+                    before_patches(connection)
+                for patch in pending:
+                    if not fresh:
+                        patch.apply(connection)
+                        logger.info("Patch de schema aplicado: %s", patch.name)
+                    _mark_applied(connection, patch)
+                    applied.append(patch.name)
+        finally:
+            if sqlite:
+                connection.exec_driver_sql("PRAGMA foreign_keys = ON")
+                connection.commit()
+    return applied

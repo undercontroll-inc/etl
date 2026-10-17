@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import Engine, text
+from sqlalchemy import Connection, Engine, text
 
 from ml_etl.domain.buckets import RISING_TRAJECTORIES
 from ml_etl.logging_config import get_logger
@@ -196,11 +196,15 @@ VIEWS: tuple[tuple[str, str], ...] = (
 )
 
 
+def drop_views_on(connection: Connection) -> None:
+    for name, _ in reversed(VIEWS):
+        connection.execute(text(f"DROP VIEW IF EXISTS {name}"))
+
+
 def create_views(engine: Engine) -> list[str]:
     created: list[str] = []
     with engine.begin() as connection:
-        for name, _ in reversed(VIEWS):
-            connection.execute(text(f"DROP VIEW IF EXISTS {name}"))
+        drop_views_on(connection)
         for name, statement in VIEWS:
             connection.execute(text(statement))
             created.append(name)
@@ -210,6 +214,5 @@ def create_views(engine: Engine) -> list[str]:
 
 def drop_views(engine: Engine) -> None:
     with engine.begin() as connection:
-        for name, _ in reversed(VIEWS):
-            connection.execute(text(f"DROP VIEW IF EXISTS {name}"))
+        drop_views_on(connection)
     logger.warning("Views de consumo removidas")
