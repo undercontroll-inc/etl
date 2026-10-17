@@ -19,7 +19,11 @@ def filter_small_appliances(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[Rej
 
     working = frame.copy()
     classifications = [
-        classify_small_appliance(row["title"], row.get("enriched_category_id") or row.get("category_id"))
+        classify_small_appliance(
+            row["title"],
+            row.get("enriched_category_id") or row.get("category_id"),
+            row.get("domain_id"),
+        )
         for _, row in working.iterrows()
     ]
 

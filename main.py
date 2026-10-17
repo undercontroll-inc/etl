@@ -5,8 +5,9 @@ import json
 import sys
 
 from ml_etl.config import ConfigError, get_settings
-from ml_etl.db import init_schema, session_scope
+from ml_etl.db import drop_schema, get_engine, init_schema, session_scope
 from ml_etl.db.repository import recent_runs, table_counts
+from ml_etl.db.views import create_views
 from ml_etl.logging_config import get_logger, setup_logging
 from ml_etl.pipeline import run_pipeline
 
@@ -20,7 +21,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
-    subparsers.add_parser("init-db", help="Cria o schema no banco configurado")
+    subparsers.add_parser("init-db", help="Cria o schema e as views no banco configurado")
+    subparsers.add_parser("create-views", help="Recria apenas as views de consumo do backend")
+
+    reset_parser = subparsers.add_parser("reset-db", help="Remove e recria o schema (apaga todos os dados)")
+    reset_parser.add_argument("--yes", action="store_true", help="Confirma a remocao sem prompt interativo")
 
     run_parser = subparsers.add_parser("run", help="Executa o pipeline ETL")
     run_parser.add_argument("--categories", help="Lista de category_id separada por vírgula")
@@ -40,7 +45,25 @@ def build_parser() -> argparse.ArgumentParser:
 
 def command_init_db() -> int:
     init_schema()
-    print("Schema criado ou já existente.")
+    print("Schema e views criados ou já existentes.")
+    return 0
+
+
+def command_create_views() -> int:
+    created = create_views(get_engine())
+    print("Views recriadas:")
+    for name in created:
+        print(f"  {name}")
+    return 0
+
+
+def command_reset_db(args: argparse.Namespace) -> int:
+    if not args.yes:
+        print("Este comando apaga todos os dados. Repita com --yes para confirmar.", file=sys.stderr)
+        return 2
+    drop_schema()
+    init_schema()
+    print("Schema recriado do zero.")
     return 0
 
 
@@ -100,6 +123,8 @@ def main(argv: list[str] | None = None) -> int:
 
     handlers = {
         "init-db": lambda: command_init_db(),
+        "create-views": lambda: command_create_views(),
+        "reset-db": lambda: command_reset_db(args),
         "run": lambda: command_run(args),
         "status": lambda: command_status(args),
     }

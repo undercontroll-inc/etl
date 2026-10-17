@@ -1,20 +1,23 @@
 # ETL Mercado Livre — Projeto UnderControll
 
-Pipeline ETL em Python que coleta sinais de mercado do Mercado Livre (Trends e Highlights),
-normaliza, filtra o domínio de pequenos eletrodomésticos, calcula um score explicável e
-persiste o resultado em PostgreSQL para consumo pelo backend Java.
+Pipeline ETL em Python que coleta sinais de mercado do Mercado Livre (Trends, Highlights e
+ofertas de catálogo), normaliza, filtra o domínio de pequenos eletrodomésticos, calcula um
+score explicável e persiste o resultado em PostgreSQL para consumo pelo backend Java, que
+agrupa, filtra e monta o payload de insights para uma AI.
 
 ```mermaid
 flowchart LR
     ML["Mercado Livre API"] --> EXTRACT
     EXTRACT --> RAW["RAW (payload auditavel)"]
-    RAW --> ENRICH
+    RAW --> ENRICH["ENRICH (atributos + ofertas)"]
     ENRICH --> TRANSFORM["TRANSFORM (pandas)"]
     TRANSFORM --> FILTER["FILTER (pequenos eletro)"]
     FILTER --> SCORE["SCORE (0 a 100)"]
     SCORE --> LOAD["LOAD (upsert idempotente)"]
     LOAD --> DB[("PostgreSQL")]
-    DB --> Java["Backend Java"]
+    DB --> VIEWS["Views de consumo"]
+    VIEWS --> Java["Backend Java"]
+    Java --> AI["AI de insights"]
 
     TRANSFORM -.-> REJ[("etl_rejection")]
     FILTER -.-> REJ
@@ -24,7 +27,11 @@ flowchart LR
 ```
 
 O backend Java nunca consulta o Mercado Livre: ele lê apenas a camada curada que este
-pipeline persiste.
+pipeline persiste, preferencialmente pelas views descritas em
+[Camada consumida pelo backend](#camada-consumida-pelo-backend).
+
+O prompt e o dicionário de dados para a AI de insights estão em
+[docs/ai-insights-prompt.md](docs/ai-insights-prompt.md).
 
 ## Endpoints do Mercado Livre
 
@@ -46,6 +53,7 @@ flowchart LR
     subgraph stageEnrich [ENRICH]
         I1["GET /items?ids=id1,...,id20"]
         P1["GET /products/:productId"]
+        O1["GET /products/:productId/items"]
         U1["GET /user-products/:userProductId"]
         C2["GET /categories/:categoryId"]
     end
@@ -55,6 +63,7 @@ flowchart LR
     Token -->|Bearer| H1
     Token -->|Bearer| I1
     Token -->|Bearer| P1
+    Token -->|Bearer| O1
     Token -->|Bearer| U1
 
     H1 -->|"id, position e type de cada posicao"| Router{"roteia por external_type"}
@@ -62,8 +71,9 @@ flowchart LR
     Router --> P1
     Router --> U1
 
+    P1 -->|"para cada PRODUCT"| O1
+    O1 -->|"preco, concorrencia e category_id real"| C2
     I1 --> C2
-    P1 --> C2
     U1 --> C2
 ```
 
@@ -74,12 +84,29 @@ flowchart LR
 | `GET /highlights/MLB/category/:categoryId` | EXTRACT | Bearer | Ranking top 20, alimenta `source = HIGHLIGHTS_CATEGORY` |
 | `GET /categories/:categoryId` | EXTRACT e ENRICH | Público | Nome e `path_from_root` da categoria |
 | `GET /items?ids=` | ENRICH | Bearer | Multiget de até 20 ITEMs por chamada |
-| `GET /products/:productId` | ENRICH | Bearer | Ficha de catálogo de um PRODUCT |
+| `GET /products/:productId` | ENRICH | Bearer | Ficha de catálogo: título, `domain_id` e atributos técnicos |
+| `GET /products/:productId/items` | ENRICH | Bearer | **Única fonte de preço**: ofertas concorrentes com preço, vendedor e `category_id` real |
 | `GET /user-products/:userProductId` | ENRICH | Bearer | Publicação de vendedor de um USER_PRODUCT |
 
-Dois métodos existem em [mercado_livre.py](ml_etl/api/mercado_livre.py) mas ainda não estão
-ligados ao pipeline: `get_site_categories` (`GET /sites/MLB/categories`) e `get_item_prices`
-(`GET /items/:itemId/prices`), este último listado como opcional na especificação.
+### Por que o preço vem das ofertas de catálogo
+
+A ficha de `GET /products/:productId` **não traz preço**: o campo `buy_box_winner` retorna
+`null` para tokens de aplicação. E com credenciais `client_credentials` os endpoints
+`GET /items/:itemId`, `GET /items/:itemId/prices` e `GET /sites/MLB/search` respondem
+`403 access_denied`.
+
+Isso deixa `GET /products/:productId/items` como o único caminho para preço no nível de
+acesso do projeto. Ele compensa bem: uma chamada devolve a dispersão de preço completa
+(mínimo, mediana, máximo), a profundidade da concorrência (`paging.total`), o desconto
+vigente (comparando `price` com `original_price`) e o `category_id` real — que a ficha de
+catálogo também não fornece.
+
+A cobertura é total na prática, porque todas as posições do ranking de `MLB5726` retornam
+com `type = PRODUCT`. Produtos sem ofertas utilizáveis geram um aviso em `etl_rejection` com
+a regra `ofertas de catalogo indisponiveis para o produto` e seguem no pipeline sem preço.
+
+Um método existe em [mercado_livre.py](ml_etl/api/mercado_livre.py) mas não está ligado ao
+pipeline: `get_site_categories` (`GET /sites/MLB/categories`).
 
 ### Rate limit e falhas de rede
 
@@ -132,12 +159,17 @@ python main.py status
 
 | Comando | Descrição |
 |---|---|
-| `init-db` | Cria o schema completo no banco configurado |
+| `init-db` | Cria o schema completo e as views de consumo |
+| `create-views` | Recria apenas as views, sem tocar nas tabelas |
+| `reset-db --yes` | Remove e recria o schema do zero, apagando todos os dados |
 | `run` | Executa o pipeline ponta a ponta |
 | `run --skip-api --run-id <uuid>` | Reprocessa a partir do RAW, sem chamar a API |
 | `run --categories MLB5726,MLB432825` | Sobrescreve as categorias-alvo |
 | `run --bucket day` | Sobrescreve a granularidade do snapshot |
 | `status` | Mostra as últimas execuções e a contagem por tabela |
+
+O `create-views` é útil depois de alterar [views.py](ml_etl/db/views.py): ele derruba e
+recria as cinco views sem exigir recarga de dados.
 
 ### Alternando o banco
 
@@ -166,17 +198,20 @@ flowchart TD
     Ex --> RawSave["RAW: grava payload com hash sha256 em market_raw_response"]
 
     RawSave --> Keys["deriva as chaves (external_type, external_id) validas dos highlights"]
-    Keys --> En["ENRICH: busca titulo, categoria, marca e preco"]
+    Keys --> En["ENRICH: titulo, domain_id, marca, modelo e atributos tecnicos"]
+    En --> Off["ENRICH ofertas: preco, concorrencia e category_id real por PRODUCT"]
 
-    En --> Parse["TRANSFORM: monta o DataFrame dos highlights"]
+    Off --> Parse["TRANSFORM: monta o DataFrame dos highlights"]
     Parse --> Valid{"regras bloqueantes"}
     Valid -->|reprova| RejBlock["etl_rejection BLOQUEANTE"]
     Valid -->|aprova| Dedup["deduplica por source, tipo, id e categoria"]
     Dedup --> Canon["canonicaliza o titulo, preservando o original"]
     Canon --> Traj["calcula rank_delta contra o bucket anterior"]
+    Traj --> Delta["calcula price_delta_pct contra o bucket anterior"]
 
-    Traj --> Snap["LOAD: market_snapshot (camada normalizada completa)"]
-    Traj --> Filt["FILTER: classificador de pequenos eletrodomesticos"]
+    Delta --> Snap["LOAD: market_snapshot (camada normalizada completa)"]
+    Delta --> Price["LOAD: market_price_observation (serie de preco)"]
+    Delta --> Filt["FILTER: classificador de pequenos eletrodomesticos"]
     Filt -->|fora do dominio| RejBiz["etl_rejection REJEICAO_NEGOCIO"]
     Filt -->|dentro| Sc["SCORE: 5 componentes ponderados"]
 
@@ -199,7 +234,9 @@ flowchart LR
 ```
 
 O endpoint gravado em cada payload é o que determina o `external_type` na reconstrução:
-`/items` em lote, `/products/` e `/user-products/`.
+`/items` em lote, `/products/` e `/user-products/`. Os payloads de
+`/products/:productId/items` são reconhecidos separadamente e reagregados, de modo que preço
+e concorrência são reproduzidos no replay sem nova chamada à API.
 
 ## Classificação nas APIs
 
@@ -224,16 +261,32 @@ flowchart TD
     Code -->|"outro"| RejMiss["etl_rejection: enriquecimento indisponivel (AVISO)"]
 
     Route -->|PRODUCT| Prod["GET /products/:id"]
+    Prod --> Offers["GET /products/:id/items"]
     Route -->|USER_PRODUCT| UserProd["GET /user-products/:id"]
     Prod --> Norm
+    Offers --> Norm
     UserProd --> Norm
 
-    Norm["normaliza para uma forma unica de entidade"] --> Fields["title ou name; category_id ou domain_id; price ou buy_box_winner.price; marca do atributo BRAND"]
+    Norm["normaliza para uma forma unica de entidade"] --> Fields["title ou name; domain_id separado de category_id; preco vindo das ofertas; atributos tecnicos normalizados"]
 ```
 
 A normalização é o que permite tratar os três tipos como uma única entidade a partir do
-TRANSFORM: `/products` devolve `name` em vez de `title` e o preço vem em
-`buy_box_winner.price`, enquanto `/items` traz `title` e `price` diretos.
+TRANSFORM: `/products` devolve `name` em vez de `title` e não traz preço nem `category_id`,
+enquanto `/items` traz `title` e `price` diretos.
+
+Dois campos que antes se misturavam agora são distintos, e a diferença importa para quem
+consome:
+
+- `domain_id` (`MLB-MICROWAVES`) é o tipo de aparelho na taxonomia do Mercado Livre. É o
+  grão correto para agrupar por tipo de produto.
+- `category_id` (`MLB73057`) é a categoria real, resolvida a partir das ofertas de catálogo,
+  e é a chave que faz join com `market_category` para obter o nome legível.
+
+Os atributos técnicos saem do array `attributes` e viram colunas consultáveis:
+`POWER` → `power_watts` (inteiro, entendendo `1.500 W` como 1500), `VOLUME_CAPACITY` →
+`capacity_value` + `capacity_unit` (aceitando `12 Litros` e `4,5L`), `VOLTAGE` → `voltage`
+(`110V`, `220V` ou `BIVOLT`), além de `MODEL`, `COLOR` e `ENERGY_EFFICIENCY`. A lógica está
+em [attributes.py](ml_etl/domain/attributes.py).
 
 A validação de tipo e de rank roda antes das chamadas de enriquecimento, para não gastar
 requisição com linha inválida, mas as rejeições são gravadas com `stage = TRANSFORM` — é por
@@ -242,28 +295,50 @@ esse valor que você filtra em `etl_rejection`. As falhas de enriquecimento fica
 
 ### Classificador de domínio (FILTER)
 
-Decide se o produto é um pequeno eletrodoméstico. A blacklist tem precedência sobre a
-whitelist, para que acessórios e peças não entrem na camada curada mesmo quando o título
-menciona o aparelho.
+Decide se o produto é um pequeno eletrodoméstico. As blacklists têm precedência sobre as
+whitelists, para que acessórios e peças não entrem na camada curada mesmo quando o título
+menciona o aparelho ou quando a categoria do Mercado Livre é de eletrodoméstico.
 
 ```mermaid
 flowchart TD
-    In["tokens do titulo canonico"] --> Empty{"sem tokens?"}
+    In["titulo canonico + category_id + domain_id"] --> DomBlack{"domain_id na blacklist de dominios?"}
+    DomBlack -->|sim| OutDomBlack["fora: DOMINIO_BLACKLIST"]
+    DomBlack -->|nao| Empty{"sem tokens?"}
     Empty -->|sim| OutEmpty["fora: TITULO_VAZIO"]
     Empty -->|nao| Short{"menos de 2 tokens?"}
     Short -->|sim| OutShort["fora: TITULO_INSUFICIENTE"]
-    Short -->|nao| Black{"algum termo da blacklist?"}
+    Short -->|nao| Black{"termo da blacklist antes<br/>do primeiro termo de aparelho?"}
     Black -->|sim| OutBlack["fora: TERMO_BLACKLIST"]
-    Black -->|nao| White{"algum termo da whitelist?"}
-    White -->|sim| InWhite["dentro: TERMO_WHITELIST, relevancia 0.5 + 0.15 por termo"]
+    Black -->|nao| DomWhite{"domain_id na whitelist de dominios?"}
+    DomWhite -->|sim| InDom["dentro: DOMINIO_WHITELIST, relevancia 0.75"]
+    DomWhite -->|nao| White{"algum termo da whitelist?"}
+    White -->|sim| InWhite["dentro: TERMO_WHITELIST, relevancia 0.5"]
     White -->|nao| Cat{"category_id na whitelist de categorias?"}
     Cat -->|sim| InCat["dentro: CATEGORIA_WHITELIST, relevancia 0.6"]
     Cat -->|nao| OutDomain["fora: FORA_DO_DOMINIO"]
 ```
 
-A relevância resultante é limitada a 1.0 e entra no score como o componente `relevance`. As
-listas ficam em [whitelist.py](ml_etl/domain/whitelist.py) e a especificação prevê revisão
-mensal delas.
+A `DOMAIN_WHITELIST` é a camada mais forte porque usa a própria taxonomia do Mercado Livre
+em vez de heurística de texto, e a `DOMAIN_BLACKLIST` derruba classes inteiras que não são
+aparelhos — refis de filtro, lâmpadas, baterias e peças de reposição — mesmo quando estão
+bem ranqueadas em Eletrodomésticos.
+
+A ordem importa: a blacklist de termos roda **antes** da whitelist de domínios, para que uma
+"Capa Protetora Para Air Fryer" publicada em `MLB-AIR_FRYERS` continue sendo rejeitada.
+
+A blacklist de termos usa a **posição** no título, não a simples presença. Anúncio de
+acessório abre o título com o acessório ("Capa Protetora Para Air Fryer", "Refil Filtro
+Acqua Pure"), enquanto aparelho que só menciona um acessório abre com o aparelho ("Aspirador
+Pó e Água 1400w Filtro Lavável", "Balança Digital Cozinha 10kg ... Pilha"). Um termo
+bloqueado só rejeita quando aparece antes do primeiro termo de aparelho reconhecido. Sem essa
+regra, o aspirador e a balança acima — dois eletrodomésticos legítimos e bem ranqueados —
+eram descartados por causa do filtro lavável e da pilha inclusa.
+
+Cada whitelist tem uma relevância base, somada a 0,1 por termo de aparelho reconhecido no
+título (limitado a +0,25). O total é limitado a 1.0 e entra no score como o componente
+`relevance`. O motivo da decisão é persistido em `market_curated_product.domain_reason`, de
+modo que a AI e o backend vejam por que cada produto foi aceito. As listas ficam em
+[whitelist.py](ml_etl/domain/whitelist.py) e a especificação prevê revisão mensal delas.
 
 ### Canonicalização do título
 
@@ -347,9 +422,18 @@ Detalhes que valem atenção em cada componente:
   produto só por ser novo na base.
 - `trends` — só pontua a partir de 34% de sobreposição de tokens, evitando casamento por
   palavra genérica solta.
-- `relevance` — 0.5 mais 0.15 por termo da whitelist, ou 0.6 quando a decisão veio da
-  categoria.
+- `relevance` — base de 0.75 quando a decisão veio do `domain_id`, 0.6 quando veio da
+  categoria e 0.5 quando veio de termo do título, mais 0.1 por termo reconhecido (até +0.25).
 - `persistence` — satura em 3 buckets observados.
+
+### Por que preço não entra no score
+
+O score mede **popularidade**, e preço e concorrência ficam deliberadamente fora da fórmula.
+Se movimento de preço somasse pontos, "produto em alta" ficaria ambíguo: não daria para saber
+se subiu a demanda ou o preço. Mantendo os sinais separados, o consumidor pode cruzá-los e
+distinguir situações que exigem decisões opostas — score alto com preço em queda indica
+concorrência aquecida e oportunidade de estoque, enquanto score alto com preço em alta indica
+demanda aquecida e espaço para reajuste.
 
 ### Confiança e determinismo
 
@@ -376,8 +460,14 @@ especificação: o score existe, mas sinalizado como pouco confiável até haver
 ```
 
 A suíte usa SQLite em memória e uma API simulada (`tests/fake_api.py`), sem chamadas de
-rede. Cobre a execução ponta a ponta, a idempotência de reexecuções, o reprocessamento a
-partir do RAW, as regras de rejeição e a canonicalização.
+rede. Cobre a execução ponta a ponta, a idempotência de reexecuções (incluindo
+`market_price_observation`), o reprocessamento a partir do RAW com replay das ofertas, a
+agregação de preço e concorrência, a normalização de atributos em formato pt-BR, as regras de
+rejeição por domínio, a variação de preço entre buckets, as cinco views de consumo e a
+canonicalização.
+
+Há uma regressão específica para o bug que motivou esta versão: `category_id` precisa conter
+o ID real (`MLB73057`) e não o `domain_id`, com `domain_id` guardado em coluna própria.
 
 O `setUp` isola o ambiente por completo: limpa `os.environ`, injeta apenas as variáveis do
 teste e carrega as settings com `use_dotenv=False`. Isso impede que o seu `.env` local
@@ -392,9 +482,12 @@ ml_etl/
 ├── logging_config.py
 ├── auth/                token client_credentials com cache
 ├── api/                 cliente HTTP (backoff + jitter) e endpoints do Mercado Livre
-├── db/                  engine, models e upsert dialect-aware
-├── domain/              buckets, canonicalização, whitelist e regras de rejeição
-└── pipeline/            extract, raw, enrich, transform, filters, score, load, orchestrator
+├── db/                  engine, models, views de consumo e upsert dialect-aware
+├── domain/              buckets, canonicalização, atributos, whitelist e rejeições
+└── pipeline/            extract, raw, enrich, offers, transform, filters, score, load, orchestrator
+
+docs/
+└── ai-insights-prompt.md   prompt, dicionário de dados e guardrails para a AI
 ```
 
 ## Modelo de dados
@@ -405,15 +498,19 @@ erDiagram
     etl_run ||--o{ etl_rejection : "registra"
     etl_run ||--o{ market_snapshot : "produz"
     etl_run ||--o{ market_trend : "produz"
+    etl_run ||--o{ market_price_observation : "produz"
     etl_run ||--o{ market_score : "produz"
     etl_run ||--o{ market_curated_product : "produz"
 
     market_entity ||--o{ market_snapshot : "e observada em"
+    market_entity ||--o{ market_price_observation : "tem preco em"
     market_entity ||--o{ market_score : "recebe"
     market_category ||--o{ market_snapshot : "classifica"
+    market_category ||--o{ market_entity : "nomeia"
     market_category ||--o{ market_trend : "agrupa"
 
     market_snapshot ||--o| market_curated_product : "vira apos FILTER e SCORE"
+    market_price_observation ||--o| market_curated_product : "enriquece com preco"
     market_score ||--o| market_curated_product : "compoe"
 ```
 
@@ -421,24 +518,78 @@ As camadas se dividem assim:
 
 - **Auditoria** — `etl_run`, `market_raw_response`, `etl_rejection`
 - **Referência** — `market_category`, `market_entity`
-- **Série temporal** — `market_snapshot`, `market_trend`
+- **Série temporal** — `market_snapshot`, `market_trend`, `market_price_observation`
 - **Analítica** — `market_score`, `market_curated_product`
+
+### `market_price_observation`
+
+Uma linha por produto por bucket, única em `(external_type, external_id, bucket_key)`. Guarda
+a distribuição de preço (`price_min`, `price_p25`, `price_median`, `price_p75`, `price_max`),
+a concorrência (`offer_count`, `seller_count`, `official_store_count`), o desconto
+(`original_price_median`, `discount_pct_median`) e quem lidera o card (`winner_item_id`,
+`winner_price`).
+
+É a tabela que constrói a série histórica de preço. Como a granularidade padrão é mensal,
+uma comparação mês contra mês exige dois ciclos de coleta: no primeiro mês `price_delta_pct`
+sai nulo por definição.
 
 ## Camada consumida pelo backend
 
-A tabela `market_curated_product` é o contrato de saída e espelha o dicionário de dados da
-especificação: `id`, `collected_at`, `external_type`, `rank`, `title`, `external_id`,
-`score`, `source`, mais `canonical_title`, `rank_band`, `rank_delta`, `trajectory_label`,
-`category_id`, `brand`, `price`, `permalink`, `priority_label`, `confidence`, `bucket_key` e
-`run_id` para auditoria.
+O contrato principal é a tabela `market_curated_product`, agora desnormalizada para que o
+backend responda a perguntas de agrupamento sem join. Além dos campos de ranking e score, ela
+carrega taxonomia (`domain_id`, `category_id`, `category_name`), identidade
+(`brand`, `brand_slug`, `model`, `product_key`), atributos técnicos (`voltage`,
+`power_watts`, `capacity_value`, `capacity_unit`, `energy_efficiency`), preço e concorrência
+(`price_min`, `price_median`, `price_max`, `price_delta_pct`, `discount_pct`, `offer_count`,
+`seller_count`) e a rastreabilidade da classificação (`relevance`, `domain_reason`).
+
+Sobre ela existem cinco views, criadas pelo `init-db` e recriáveis com `create-views`:
+
+| View | Grão | Para que serve |
+|---|---|---|
+| `vw_market_product_current` | um produto | foto achatada do bucket mais recente |
+| `vw_market_rising_products` | um produto | a tabela de produtos em alta, já filtrada |
+| `vw_market_category_summary` | `domain_id` + bucket | agrupamento por tipo de aparelho |
+| `vw_market_brand_summary` | `brand_slug` + bucket | agrupamento por marca |
+| `vw_market_price_movement` | `domain_id` + bucket | variação de preço mês a mês |
 
 ```mermaid
 flowchart LR
-    Java["Backend Java"] -->|"SELECT por bucket_key e score"| Curated[("market_curated_product")]
-    Java -->|"opcional: serie historica"| Snap[("market_snapshot")]
-    Java -->|"opcional: decomposicao do score"| Score[("market_score")]
+    subgraph views [Views de consumo]
+        V1["vw_market_product_current"]
+        V2["vw_market_rising_products"]
+        V3["vw_market_category_summary"]
+        V4["vw_market_brand_summary"]
+        V5["vw_market_price_movement"]
+    end
+
+    Curated[("market_curated_product")] --> V1
+    Curated --> V3
+    Curated --> V4
+    V1 --> V2
+    Price[("market_price_observation")] --> V5
+    Entity[("market_entity")] --> V5
+
+    views --> Java["Backend Java"]
+    Java -->|"cruza por product_key, brand_slug e domain_id"| Repairs[("Catalogo de consertos")]
+    Java --> AI["AI de insights"]
     Java -.->|"nunca"| ML["Mercado Livre API"]
 ```
+
+### Chaves para cruzar com os consertos do cliente
+
+O ETL não conhece os consertos: ele expõe chaves normalizadas e o backend faz o match em três
+níveis, do mais preciso ao mais abrangente.
+
+| Nível | Chave | Significado |
+|---|---|---|
+| exato | `product_key` (`electrolux:me23s`) | o mesmo modelo que o cliente conserta |
+| bom | `brand_slug` + `domain_id` | mesma marca e mesmo tipo de aparelho |
+| cobertura | `domain_id` | mesmo tipo de aparelho, marca diferente |
+
+A ausência de match também é informação: um `domain_id` em alta que não aparece no catálogo
+do cliente é candidato a expansão de serviço. A estratégia completa, com as consultas SQL
+prontas, está em [docs/ai-insights-prompt.md](docs/ai-insights-prompt.md).
 
 Registros descartados por qualquer regra ficam em `etl_rejection`, com etapa, camada,
 regra e severidade.

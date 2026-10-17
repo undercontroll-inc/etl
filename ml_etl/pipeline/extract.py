@@ -42,7 +42,7 @@ class ExtractResult:
         self.rejections.extend(other.rejections)
 
 
-def _run_parallel(items: Sequence[Any], worker, max_workers: int) -> list[Any]:
+def run_parallel(items: Sequence[Any], worker, max_workers: int) -> list[Any]:
     if not items:
         return []
     if max_workers <= 1 or len(items) == 1:
@@ -94,7 +94,7 @@ def extract_categories(api: MercadoLivreApi, category_ids: Sequence[str], settin
         )
         return local
 
-    for partial in _run_parallel(list(category_ids), worker, active.etl.max_workers):
+    for partial in run_parallel(list(category_ids), worker, active.etl.max_workers):
         result.merge(partial)
 
     logger.info("EXTRACT categorias: %s payloads", len(result.payloads))
@@ -148,7 +148,7 @@ def extract_highlights(api: MercadoLivreApi, category_ids: Sequence[str], settin
         )
         return local
 
-    for partial in _run_parallel(list(category_ids), worker, active.etl.max_workers):
+    for partial in run_parallel(list(category_ids), worker, active.etl.max_workers):
         result.merge(partial)
 
     logger.info("EXTRACT highlights: %s payloads, %s rejeicoes", len(result.payloads), len(result.rejections))
@@ -203,7 +203,7 @@ def extract_trends(api: MercadoLivreApi, category_ids: Sequence[str], settings: 
         )
         return local
 
-    for partial in _run_parallel(targets, worker, active.etl.max_workers):
+    for partial in run_parallel(targets, worker, active.etl.max_workers):
         result.merge(partial)
 
     logger.info("EXTRACT trends: %s payloads", len(result.payloads))

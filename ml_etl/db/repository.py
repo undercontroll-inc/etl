@@ -15,6 +15,7 @@ from ml_etl.db.models import (
     MarketCategory,
     MarketCuratedProduct,
     MarketEntity,
+    MarketPriceObservation,
     MarketRawResponse,
     MarketScore,
     MarketSnapshot,
@@ -37,7 +38,17 @@ UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "title",
             "canonical_title",
             "category_id",
+            "domain_id",
             "brand",
+            "brand_slug",
+            "model",
+            "product_key",
+            "color",
+            "voltage",
+            "power_watts",
+            "capacity_value",
+            "capacity_unit",
+            "energy_efficiency",
             "price",
             "available_quantity",
             "condition",
@@ -59,6 +70,28 @@ UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ("external_type", "external_id", "bucket_key"),
         ("score", "priority_label", "confidence", "components", "computed_at", "run_id", "updated_at"),
     ),
+    MarketPriceObservation: (
+        ("external_type", "external_id", "bucket_key"),
+        (
+            "offer_count",
+            "seller_count",
+            "official_store_count",
+            "price_min",
+            "price_p25",
+            "price_median",
+            "price_p75",
+            "price_max",
+            "original_price_median",
+            "discount_pct_median",
+            "winner_item_id",
+            "winner_price",
+            "currency_id",
+            "category_id",
+            "collected_at",
+            "run_id",
+            "updated_at",
+        ),
+    ),
     MarketCuratedProduct: (
         ("source", "external_type", "external_id", "bucket_key"),
         (
@@ -71,8 +104,27 @@ UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "rank_delta",
             "trajectory_label",
             "category_id",
+            "category_name",
+            "domain_id",
             "brand",
+            "brand_slug",
+            "model",
+            "product_key",
+            "voltage",
+            "power_watts",
+            "capacity_value",
+            "capacity_unit",
+            "energy_efficiency",
             "price",
+            "price_min",
+            "price_median",
+            "price_max",
+            "price_delta_pct",
+            "discount_pct",
+            "offer_count",
+            "seller_count",
+            "relevance",
+            "domain_reason",
             "permalink",
             "priority_label",
             "confidence",
@@ -197,6 +249,18 @@ def count_prior_buckets(session: Session, bucket_key: str) -> dict[tuple[str, st
     return {(row[0], row[1]): row[2] for row in session.execute(stmt)}
 
 
+def fetch_previous_price_medians(session: Session, bucket_key: str) -> dict[tuple[str, str], float]:
+    previous_bucket = select(func.max(MarketPriceObservation.bucket_key)).where(
+        MarketPriceObservation.bucket_key < bucket_key
+    )
+    stmt = select(
+        MarketPriceObservation.external_type,
+        MarketPriceObservation.external_id,
+        MarketPriceObservation.price_median,
+    ).where(MarketPriceObservation.bucket_key == previous_bucket.scalar_subquery())
+    return {(row[0], row[1]): float(row[2]) for row in session.execute(stmt) if row[2] is not None}
+
+
 def fetch_cached_categories(session: Session) -> dict[str, MarketCategory]:
     stmt = select(MarketCategory)
     return {row.category_id: row for row in session.execute(stmt).scalars()}
@@ -219,6 +283,7 @@ def table_counts(session: Session) -> dict[str, int]:
         MarketEntity,
         MarketSnapshot,
         MarketTrend,
+        MarketPriceObservation,
         MarketScore,
         MarketCuratedProduct,
         EtlRejection,

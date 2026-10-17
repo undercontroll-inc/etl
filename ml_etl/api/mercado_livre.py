@@ -65,6 +65,9 @@ class MercadoLivreApi:
     def get_product(self, product_id: str) -> ApiResponse:
         return self._client.get(f"/products/{product_id}", authenticated=True, allow_not_found=True)
 
+    def get_product_items(self, product_id: str) -> ApiResponse:
+        return self._client.get(f"/products/{product_id}/items", authenticated=True, allow_not_found=True)
+
     def get_user_product(self, user_product_id: str) -> ApiResponse:
         return self._client.get(f"/user-products/{user_product_id}", authenticated=True, allow_not_found=True)
 

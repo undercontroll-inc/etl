@@ -61,16 +61,20 @@ def get_session_factory(settings: Settings | None = None) -> sessionmaker[Sessio
 
 def init_schema(engine: Engine | None = None) -> None:
     from ml_etl.db.models import Base
+    from ml_etl.db.views import create_views
 
     target = engine or get_engine()
     Base.metadata.create_all(target)
+    create_views(target)
     logger.info("Schema garantido em %s", target.dialect.name)
 
 
 def drop_schema(engine: Engine | None = None) -> None:
     from ml_etl.db.models import Base
+    from ml_etl.db.views import drop_views
 
     target = engine or get_engine()
+    drop_views(target)
     Base.metadata.drop_all(target)
     logger.warning("Schema removido em %s", target.dialect.name)
 

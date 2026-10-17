@@ -103,7 +103,17 @@ class MarketEntity(Base, TimestampMixin):
     title: Mapped[str] = mapped_column(Text, nullable=False)
     canonical_title: Mapped[str | None] = mapped_column(Text, nullable=True)
     category_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    domain_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    brand_slug: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    product_key: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    color: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    voltage: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    power_watts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    capacity_value: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    capacity_unit: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    energy_efficiency: Mapped[str | None] = mapped_column(String(10), nullable=True)
     price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     available_quantity: Mapped[int | None] = mapped_column(Integer, nullable=True)
     condition: Mapped[str | None] = mapped_column(String(30), nullable=True)
@@ -116,6 +126,9 @@ class MarketEntity(Base, TimestampMixin):
         UniqueConstraint("external_type", "external_id", name="uq_entity_type_external_id"),
         CheckConstraint(f"external_type IN {EXTERNAL_TYPES}", name="ck_entity_external_type"),
         Index("ix_entity_category", "category_id"),
+        Index("ix_entity_domain", "domain_id"),
+        Index("ix_entity_brand_slug", "brand_slug"),
+        Index("ix_entity_product_key", "product_key"),
     )
 
 
@@ -141,6 +154,38 @@ class MarketSnapshot(Base, TimestampMixin):
         CheckConstraint(f"external_type IN {EXTERNAL_TYPES}", name="ck_snapshot_external_type"),
         Index("ix_snapshot_bucket", "bucket_key"),
         Index("ix_snapshot_entity", "external_type", "external_id"),
+    )
+
+
+class MarketPriceObservation(Base, TimestampMixin):
+    __tablename__ = "market_price_observation"
+
+    id: Mapped[int] = mapped_column(SurrogateKey, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("etl_run.run_id", ondelete="SET NULL"), nullable=True)
+    external_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    external_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
+    offer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    seller_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    official_store_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    price_min: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_p25: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_p75: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_max: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    original_price_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    discount_pct_median: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
+    winner_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    winner_price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    currency_id: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    category_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("external_type", "external_id", "bucket_key", name="uq_price_observation_logical"),
+        CheckConstraint("offer_count >= 0", name="ck_price_offer_count"),
+        Index("ix_price_bucket", "bucket_key"),
+        Index("ix_price_entity", "external_type", "external_id"),
     )
 
 
@@ -201,8 +246,27 @@ class MarketCuratedProduct(Base, TimestampMixin):
     rank_delta: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trajectory_label: Mapped[str | None] = mapped_column(String(30), nullable=True)
     category_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    category_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    domain_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     brand: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    brand_slug: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    model: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    product_key: Mapped[str | None] = mapped_column(String(180), nullable=True)
+    voltage: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    power_watts: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    capacity_value: Mapped[float | None] = mapped_column(Numeric(10, 3), nullable=True)
+    capacity_unit: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    energy_efficiency: Mapped[str | None] = mapped_column(String(10), nullable=True)
     price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_min: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_max: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_delta_pct: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+    discount_pct: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
+    offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    seller_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    relevance: Mapped[float | None] = mapped_column(Numeric(5, 4), nullable=True)
+    domain_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
     permalink: Mapped[str | None] = mapped_column(Text, nullable=True)
     priority_label: Mapped[str] = mapped_column(String(20), nullable=False)
     confidence: Mapped[str] = mapped_column(String(10), nullable=False)
@@ -217,6 +281,9 @@ class MarketCuratedProduct(Base, TimestampMixin):
         CheckConstraint("score >= 0 AND score <= 100", name="ck_curated_score_range"),
         Index("ix_curated_bucket_score", "bucket_key", "score"),
         Index("ix_curated_category", "category_id"),
+        Index("ix_curated_domain", "domain_id"),
+        Index("ix_curated_brand_slug", "brand_slug"),
+        Index("ix_curated_product_key", "product_key"),
     )
 
 

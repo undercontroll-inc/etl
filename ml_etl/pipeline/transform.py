@@ -24,6 +24,7 @@ from ml_etl.domain.rejection import (
 from ml_etl.logging_config import get_logger
 from ml_etl.pipeline.enrich import EnrichedEntity
 from ml_etl.pipeline.extract import SOURCE_HIGHLIGHTS, SOURCE_TRENDS, RawPayload
+from ml_etl.pipeline.offers import ProductOffers
 
 logger = get_logger(__name__)
 
@@ -178,27 +179,52 @@ def validate_highlights(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[Rejecti
     return working.reset_index(drop=True), rejections
 
 
+ENTITY_FIELDS = (
+    "title",
+    "brand",
+    "brand_slug",
+    "model",
+    "product_key",
+    "voltage",
+    "power_watts",
+    "capacity_value",
+    "capacity_unit",
+    "energy_efficiency",
+    "price",
+    "permalink",
+    "domain_id",
+    "enrich_status",
+)
+
+OFFER_FIELDS = (
+    "price_min",
+    "price_median",
+    "price_max",
+    "offer_count",
+    "seller_count",
+    "discount_pct_median",
+)
+
+
 def attach_enrichment(
     frame: pd.DataFrame,
     entities: dict[tuple[str, str], EnrichedEntity],
+    offers: dict[tuple[str, str], ProductOffers] | None = None,
 ) -> tuple[pd.DataFrame, list[Rejection]]:
     rejections: list[Rejection] = []
     if frame.empty:
         return frame, rejections
 
+    offers = offers or {}
     working = frame.copy()
-    columns = {
-        "title": [],
-        "enriched_category_id": [],
-        "brand": [],
-        "price": [],
-        "permalink": [],
-        "enrich_status": [],
-    }
-    keep_mask = []
+    columns: dict[str, list[Any]] = {name: [] for name in (*ENTITY_FIELDS, *OFFER_FIELDS)}
+    columns["enriched_category_id"] = []
+    keep_mask: list[bool] = []
 
     for _, row in working.iterrows():
-        entity = entities.get((row["external_type"], row["external_id"]))
+        key = (row["external_type"], row["external_id"])
+        entity = entities.get(key)
+
         if entity is None or not entity.title:
             rejections.append(
                 Rejection(
@@ -212,21 +238,19 @@ def attach_enrichment(
                 )
             )
             keep_mask.append(False)
-            columns["title"].append(None)
-            columns["enriched_category_id"].append(None)
-            columns["brand"].append(None)
-            columns["price"].append(None)
-            columns["permalink"].append(None)
-            columns["enrich_status"].append("MISSING")
+            for name in columns:
+                columns[name].append(None)
+            columns["enrich_status"][-1] = "MISSING"
             continue
 
         keep_mask.append(True)
-        columns["title"].append(entity.title)
+        for name in ENTITY_FIELDS:
+            columns[name].append(getattr(entity, name))
         columns["enriched_category_id"].append(entity.category_id)
-        columns["brand"].append(entity.brand)
-        columns["price"].append(entity.price)
-        columns["permalink"].append(entity.permalink)
-        columns["enrich_status"].append(entity.enrich_status)
+
+        offer = offers.get(key)
+        for name in OFFER_FIELDS:
+            columns[name].append(getattr(offer, name) if offer is not None else None)
 
     for name, values in columns.items():
         working[name] = values
@@ -281,10 +305,33 @@ def attach_trajectory(
     return working
 
 
+def attach_price_delta(
+    frame: pd.DataFrame,
+    previous_medians: dict[tuple[str, str], float],
+) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+
+    working = frame.copy()
+    deltas: list[float | None] = []
+    for _, row in working.iterrows():
+        current = row.get("price_median")
+        previous = previous_medians.get((row["external_type"], row["external_id"]))
+        if current is None or pd.isna(current) or previous is None or previous <= 0:
+            deltas.append(None)
+            continue
+        deltas.append(round((float(current) - previous) / previous * 100, 2))
+
+    working["price_delta_pct"] = deltas
+    return working
+
+
 def build_transform_result(
     payloads: Sequence[RawPayload],
     entities: dict[tuple[str, str], EnrichedEntity],
     previous_ranks: dict[tuple[str, str, str], int],
+    offers: dict[tuple[str, str], ProductOffers] | None = None,
+    previous_medians: dict[tuple[str, str], float] | None = None,
 ) -> TransformResult:
     result = TransformResult()
 
@@ -294,13 +341,14 @@ def build_transform_result(
     validated, validation_rejections = validate_highlights(raw_highlights)
     result.rejections.extend(validation_rejections)
 
-    enriched, enrich_rejections = attach_enrichment(validated, entities)
+    enriched, enrich_rejections = attach_enrichment(validated, entities, offers)
     result.rejections.extend(enrich_rejections)
 
     canonical, canonical_rejections = canonicalize_titles(enriched)
     result.rejections.extend(canonical_rejections)
 
-    result.highlights = attach_trajectory(canonical, previous_ranks)
+    with_trajectory = attach_trajectory(canonical, previous_ranks)
+    result.highlights = attach_price_delta(with_trajectory, previous_medians or {})
     result.trends = parse_trend_payloads(payloads)
 
     logger.info(

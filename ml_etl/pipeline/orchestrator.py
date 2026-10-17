@@ -13,6 +13,7 @@ from ml_etl.domain.buckets import bucket_key_for
 from ml_etl.domain.rejection import RejectionCollector
 from ml_etl.logging_config import get_logger
 from ml_etl.pipeline import enrich, extract, filters, load, raw, score, transform
+from ml_etl.pipeline import offers as offers_module
 
 logger = get_logger(__name__)
 
@@ -34,6 +35,14 @@ def _previous_ranks(session, bucket_key: str) -> dict[tuple[str, str, str], int]
     }
 
 
+@dataclass
+class CollectedData:
+    payloads: list[extract.RawPayload] = field(default_factory=list)
+    entities: dict[tuple[str, str], enrich.EnrichedEntity] = field(default_factory=dict)
+    categories: dict[str, dict[str, Any]] = field(default_factory=dict)
+    offers: dict[tuple[str, str], offers_module.ProductOffers] = field(default_factory=dict)
+
+
 def _collect_payloads(
     session,
     run_id: str,
@@ -42,12 +51,19 @@ def _collect_payloads(
     settings: Settings,
     skip_api: bool,
     collector: RejectionCollector,
-) -> tuple[list[extract.RawPayload], dict[tuple[str, str], enrich.EnrichedEntity], dict[str, dict[str, Any]]]:
+) -> CollectedData:
     if skip_api:
         payloads = raw.load_raw_for_run(session, run_id)
         entities = _entities_from_raw(payloads)
-        categories_payload = _categories_from_raw(payloads)
-        return payloads, entities, categories_payload
+        replayed_offers = offers_module.offers_from_raw(payloads)
+        for key, entity in entities.items():
+            enrich.apply_offers(entity, replayed_offers.get(key))
+        return CollectedData(
+            payloads=payloads,
+            entities=entities,
+            categories=_categories_from_raw(payloads),
+            offers=replayed_offers,
+        )
 
     with MercadoLivreApi(settings=settings) as api:
         extracted = extract.extract_all(api, categories, settings)
@@ -56,6 +72,13 @@ def _collect_payloads(
         keys = transform.highlight_keys(extracted.payloads)
         enriched = enrich.enrich_entities(api, keys, settings)
         collector.extend(enriched.rejections)
+
+        catalog_keys = [key for key in enriched.entities if key[0] == enrich.TYPE_PRODUCT]
+        collected_offers = offers_module.collect_offers(api, catalog_keys, settings)
+        collector.extend(collected_offers.rejections)
+
+        for key, entity in enriched.entities.items():
+            enrich.apply_offers(entity, collected_offers.offers.get(key))
 
         entity_categories = [
             entity.category_id for entity in enriched.entities.values() if entity.category_id
@@ -68,9 +91,14 @@ def _collect_payloads(
         )
         collector.extend(resolved.rejections)
 
-    payloads = [*extracted.payloads, *enriched.payloads, *resolved.payloads]
+    payloads = [*extracted.payloads, *enriched.payloads, *collected_offers.payloads, *resolved.payloads]
     raw.persist_raw(session, run_id, bucket_key, payloads)
-    return payloads, enriched.entities, resolved.categories
+    return CollectedData(
+        payloads=payloads,
+        entities=enriched.entities,
+        categories=resolved.categories,
+        offers=collected_offers.offers,
+    )
 
 
 def _entities_from_raw(
@@ -83,6 +111,9 @@ def _entities_from_raw(
             continue
         endpoint = payload.endpoint
         body = payload.payload
+
+        if offers_module.product_id_from_endpoint(endpoint):
+            continue
 
         if endpoint == "/items" and isinstance(body, list):
             for entry in body:
@@ -121,6 +152,17 @@ def _entities_from_raw(
 
     logger.info("RAW replay: %s entidades reconstruidas", len(entities))
     return entities
+
+
+def _category_names(session, resolved: dict[str, dict[str, Any]]) -> dict[str, str]:
+    names = {
+        category_id: row.name for category_id, row in repository.fetch_cached_categories(session).items() if row.name
+    }
+    for category_id, payload in resolved.items():
+        name = payload.get("name")
+        if name:
+            names[category_id] = name
+    return names
 
 
 def _categories_from_raw(payloads: Sequence[extract.RawPayload]) -> dict[str, dict[str, Any]]:
@@ -189,7 +231,7 @@ def run_pipeline(
             else:
                 repository.create_run(session, effective_run_id, bucket_key, stats)
 
-            payloads, entities, resolved_categories = _collect_payloads(
+            collected = _collect_payloads(
                 session,
                 effective_run_id,
                 bucket_key,
@@ -200,7 +242,14 @@ def run_pipeline(
             )
 
             previous = _previous_ranks(session, bucket_key)
-            transformed = transform.build_transform_result(payloads, entities, previous)
+            previous_medians = repository.fetch_previous_price_medians(session, bucket_key)
+            transformed = transform.build_transform_result(
+                collected.payloads,
+                collected.entities,
+                previous,
+                collected.offers,
+                previous_medians,
+            )
             collector.extend(transformed.rejections)
 
             filtered, filter_rejections = filters.filter_small_appliances(transformed.highlights)
@@ -210,15 +259,20 @@ def run_pipeline(
             scored, score_rejections = score.score_highlights(filtered, transformed.trends, prior_buckets, active)
             collector.extend(score_rejections)
 
+            category_names = _category_names(session, collected.categories)
+
             stats.update(
                 {
-                    "raw_payloads": len(payloads),
-                    "entities": load.load_entities(session, entities),
-                    "categories_loaded": load.load_categories(session, resolved_categories),
+                    "raw_payloads": len(collected.payloads),
+                    "entities": load.load_entities(session, collected.entities),
+                    "categories_loaded": load.load_categories(session, collected.categories),
                     "snapshots": load.load_snapshots(session, transformed.highlights, effective_run_id, bucket_key),
                     "trends": load.load_trends(session, transformed.trends, effective_run_id, bucket_key),
+                    "price_observations": load.load_price_observations(
+                        session, collected.offers, effective_run_id, bucket_key, started_at
+                    ),
                     "scores": load.load_scores(session, scored, effective_run_id, bucket_key),
-                    "curated": load.load_curated(session, scored, effective_run_id, bucket_key),
+                    "curated": load.load_curated(session, scored, effective_run_id, bucket_key, category_names),
                     "rejections": len(collector),
                     "rejections_by_rule": collector.summary(),
                     "bucket_key": bucket_key,

@@ -8,17 +8,17 @@ from typing import Any
 from ml_etl.api.http_client import ApiError
 from ml_etl.api.mercado_livre import MercadoLivreApi
 from ml_etl.config import Settings, get_settings
+from ml_etl.domain.attributes import build_product_key, extract_attributes, slugify
 from ml_etl.domain.rejection import MISSING_ENRICHMENT, Layer, Rejection, Severity, Stage
 from ml_etl.logging_config import get_logger
 from ml_etl.pipeline.extract import STAGE_ENRICH, RawPayload
+from ml_etl.pipeline.offers import ProductOffers
 
 logger = get_logger(__name__)
 
 TYPE_ITEM = "ITEM"
 TYPE_PRODUCT = "PRODUCT"
 TYPE_USER_PRODUCT = "USER_PRODUCT"
-
-BRAND_ATTRIBUTE_IDS = ("BRAND", "MARCA")
 
 
 @dataclass
@@ -27,7 +27,17 @@ class EnrichedEntity:
     external_id: str
     title: str
     category_id: str | None = None
+    domain_id: str | None = None
     brand: str | None = None
+    brand_slug: str | None = None
+    model: str | None = None
+    product_key: str | None = None
+    color: str | None = None
+    voltage: str | None = None
+    power_watts: int | None = None
+    capacity_value: float | None = None
+    capacity_unit: str | None = None
+    energy_efficiency: str | None = None
     price: float | None = None
     available_quantity: int | None = None
     condition: str | None = None
@@ -54,16 +64,6 @@ class EnrichResult:
         self.categories.update(other.categories)
 
 
-def _extract_brand(attributes: Sequence[dict[str, Any]] | None) -> str | None:
-    for attribute in attributes or []:
-        identifier = (attribute.get("id") or "").upper()
-        if identifier in BRAND_ATTRIBUTE_IDS:
-            value = attribute.get("value_name") or attribute.get("values", [{}])[0].get("name")
-            if value:
-                return str(value)[:120]
-    return None
-
-
 def _as_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -85,7 +85,12 @@ def _as_int(value: Any) -> int | None:
 def entity_from_body(external_type: str, external_id: str, body: dict[str, Any], partial: bool) -> EnrichedEntity:
     title = body.get("title") or body.get("name") or ""
     attributes = body.get("attributes") or []
-    brand = _extract_brand(attributes) or body.get("brand")
+    if not isinstance(attributes, list):
+        attributes = []
+
+    parsed = extract_attributes(attributes, fallback_brand=body.get("brand"))
+    domain_id = body.get("domain_id")
+
     price = _as_float(body.get("price"))
     if price is None:
         buy_box = body.get("buy_box_winner") or {}
@@ -95,15 +100,34 @@ def entity_from_body(external_type: str, external_id: str, body: dict[str, Any],
         external_type=external_type,
         external_id=external_id,
         title=str(title),
-        category_id=body.get("category_id") or body.get("domain_id"),
-        brand=brand,
+        category_id=body.get("category_id"),
+        domain_id=domain_id,
+        brand=parsed.brand,
+        brand_slug=slugify(parsed.brand),
+        model=parsed.model,
+        product_key=build_product_key(parsed.brand, parsed.model, domain_id),
+        color=parsed.color,
+        voltage=parsed.voltage,
+        power_watts=parsed.power_watts,
+        capacity_value=parsed.capacity_value,
+        capacity_unit=parsed.capacity_unit,
+        energy_efficiency=parsed.energy_efficiency,
         price=price,
         available_quantity=_as_int(body.get("available_quantity")),
         condition=body.get("condition") or body.get("status"),
         permalink=body.get("permalink"),
-        attributes=attributes if isinstance(attributes, list) else [],
+        attributes=attributes,
         enrich_status="PARTIAL" if partial else "OK",
     )
+
+
+def apply_offers(entity: EnrichedEntity, offers: ProductOffers | None) -> EnrichedEntity:
+    """As ofertas de catalogo sao a unica fonte de preco e de category_id real para PRODUCT."""
+    if offers is None:
+        return entity
+    entity.price = offers.price_median if offers.price_median is not None else entity.price
+    entity.category_id = entity.category_id or offers.category_id
+    return entity
 
 
 def _missing_rejection(external_type: str, external_id: str, detail: str) -> Rejection:
