@@ -140,12 +140,21 @@ class ScoreSettings:
 
 
 @dataclass(frozen=True)
+class QualitySettings:
+    min_category_coverage: float = 0.5
+    min_curated_products: int = 1
+    warn_curated_products: int = 5
+    min_price_coverage: float = 0.5
+
+
+@dataclass(frozen=True)
 class Settings:
     mercado_livre: MercadoLivreSettings
     database: DatabaseSettings
     etl: EtlSettings
     score: ScoreSettings
     schedule_cron: str
+    quality: QualitySettings = field(default_factory=QualitySettings)
 
 
 def load_settings(
@@ -193,6 +202,12 @@ def load_settings(
             priority_threshold=_get_float("SCORE_PRIORITY_THRESHOLD", 75.0),
         ),
         schedule_cron=_get("ETL_SCHEDULE_CRON", "0 3 1 * *"),
+        quality=QualitySettings(
+            min_category_coverage=_get_float("ETL_QUALITY_MIN_CATEGORY_COVERAGE", 0.5),
+            min_curated_products=max(0, _get_int("ETL_QUALITY_MIN_CURATED", 1)),
+            warn_curated_products=max(0, _get_int("ETL_QUALITY_WARN_CURATED", 5)),
+            min_price_coverage=_get_float("ETL_QUALITY_MIN_PRICE_COVERAGE", 0.5),
+        ),
     )
 
 

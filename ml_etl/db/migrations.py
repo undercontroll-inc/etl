@@ -106,6 +106,16 @@ PATCHES: tuple[Patch, ...] = (
             ") WHERE domain_id IS NULL",
         ),
     ),
+    Patch(
+        name="0003_run_quality",
+        postgres=(
+            "ALTER TABLE etl_run ADD COLUMN IF NOT EXISTS quality_report JSONB",
+            "ALTER TABLE etl_run DROP CONSTRAINT IF EXISTS ck_etl_run_status",
+            "ALTER TABLE etl_run ADD CONSTRAINT ck_etl_run_status "
+            "CHECK (status IN ('RUNNING', 'SUCCESS', 'PARTIAL', 'FAILED'))",
+        ),
+        rebuild=("etl_run",),
+    ),
 )
 
 

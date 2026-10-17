@@ -26,7 +26,7 @@ from ml_etl.logging_config import get_logger
 logger = get_logger(__name__)
 
 CHUNK_SIZE = 500
-REFERENCE_STATUSES = ("SUCCESS",)
+REFERENCE_STATUSES = ("SUCCESS", "PARTIAL")
 
 
 class RunNotFoundError(LookupError):
@@ -219,12 +219,14 @@ def finish_run(
     status: str,
     stats: dict[str, Any] | None = None,
     error_message: str | None = None,
+    quality_report: dict[str, Any] | None = None,
 ) -> None:
     run = session.get(EtlRun, run_id)
     if run is None:
         raise RunNotFoundError(run_id)
     run.status = status
     run.stats = stats
+    run.quality_report = quality_report
     run.error_message = error_message
     run.finished_at = _utcnow()
     session.flush()

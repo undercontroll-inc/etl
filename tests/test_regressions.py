@@ -34,7 +34,6 @@ class ReportRegressionTest(PipelineTestCase):
         self.assertIn("injected failure", run.error_message)
         self.assertGreater(counts["market_raw_response"], 0, "o RAW coletado nao pode ser perdido")
 
-    @unittest.expectedFailure
     def test_all_highlights_failing_does_not_succeed(self) -> None:
         with mock.patch.object(
             FakeMercadoLivreApi, "get_highlights_by_category", side_effect=ApiError("HTTP 403", 403)
@@ -45,6 +44,8 @@ class ReportRegressionTest(PipelineTestCase):
         with session_scope(self.settings) as session:
             run = session.get(EtlRun, result.run_id)
         self.assertEqual("FAILED", run.status)
+        self.assertEqual("FAIL", run.quality_report["verdict"])
+        self.assertIn("category_coverage", run.error_message)
 
     def test_product_missing_from_new_run_leaves_current_view(self) -> None:
         first = self._run()

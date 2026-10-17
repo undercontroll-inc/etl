@@ -26,7 +26,7 @@ SurrogateKey = BigInteger().with_variant(Integer, "sqlite")
 
 EXTERNAL_TYPES = ("ITEM", "PRODUCT", "USER_PRODUCT")
 SOURCES = ("HIGHLIGHTS_CATEGORY", "HIGHLIGHTS_PRODUCT", "TRENDS")
-RUN_STATUSES = ("RUNNING", "SUCCESS", "FAILED")
+RUN_STATUSES = ("RUNNING", "SUCCESS", "PARTIAL", "FAILED")
 
 
 def utcnow() -> datetime:
@@ -61,6 +61,7 @@ class EtlRun(Base):
     bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
     params: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     stats: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    quality_report: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (

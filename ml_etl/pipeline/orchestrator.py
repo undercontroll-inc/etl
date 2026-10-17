@@ -12,7 +12,7 @@ from ml_etl.db import repository, session_scope
 from ml_etl.domain.buckets import bucket_key_for
 from ml_etl.domain.rejection import RejectionCollector
 from ml_etl.logging_config import get_logger
-from ml_etl.pipeline import enrich, extract, filters, load, raw, score, transform
+from ml_etl.pipeline import enrich, extract, filters, load, quality, raw, score, transform
 from ml_etl.pipeline import offers as offers_module
 
 logger = get_logger(__name__)
@@ -25,6 +25,7 @@ class PipelineResult:
     status: str
     stats: dict[str, Any] = field(default_factory=dict)
     error_message: str | None = None
+    quality_report: dict[str, Any] | None = None
 
 
 def _previous_ranks(session, bucket_key: str) -> dict[tuple[str, str, str], int]:
@@ -221,6 +222,9 @@ def run_pipeline(
                 raise repository.RunNotFoundError(run_id)
             params["replay_of"] = (source.params or {}).get("replay_of") or source.run_id
             bucket_key = source.bucket_key
+            if categories is None:
+                target_categories = list((source.params or {}).get("categories") or target_categories)
+                params["categories"] = target_categories
         effective_run_id = str(uuid.uuid4())
     else:
         effective_run_id = run_id or str(uuid.uuid4())
@@ -267,6 +271,9 @@ def run_pipeline(
             collector.extend(score_rejections)
 
             category_names = _category_names(session, collected.categories)
+            report = quality.evaluate(
+                target_categories, collected.payloads, scored, collector.items, active.quality
+            )
 
             stats.update(
                 {
@@ -282,14 +289,28 @@ def run_pipeline(
                     "rejections": len(collector),
                     "rejections_by_rule": collector.summary(),
                     "bucket_key": bucket_key,
+                    "quality": str(report.verdict),
                 }
             )
 
+            status = report.run_status
+            error_message = None
+            if status == "FAILED":
+                error_message = "quality gate reprovou: " + ", ".join(report.failures())
             load.load_rejections(session, collector.rows(effective_run_id))
-            repository.finish_run(session, effective_run_id, "SUCCESS", stats)
+            repository.finish_run(
+                session, effective_run_id, status, stats, error_message, quality_report=report.as_dict()
+            )
 
-        logger.info("Pipeline concluido run_id=%s stats=%s", effective_run_id, stats)
-        return PipelineResult(run_id=effective_run_id, bucket_key=bucket_key, status="SUCCESS", stats=stats)
+        logger.info("Pipeline concluido run_id=%s status=%s stats=%s", effective_run_id, status, stats)
+        return PipelineResult(
+            run_id=effective_run_id,
+            bucket_key=bucket_key,
+            status=status,
+            stats=stats,
+            error_message=error_message,
+            quality_report=report.as_dict(),
+        )
 
     except Exception as exc:
         logger.exception("Pipeline falhou run_id=%s", effective_run_id)

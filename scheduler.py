@@ -24,6 +24,8 @@ def execute_job() -> None:
     result = run_pipeline()
     if result.status == "SUCCESS":
         logger.info("Execução agendada concluída run_id=%s stats=%s", result.run_id, result.stats)
+    elif result.status == "PARTIAL":
+        logger.warning("Execução agendada parcial run_id=%s qualidade=%s", result.run_id, result.quality_report)
     else:
         logger.error("Execução agendada falhou run_id=%s erro=%s", result.run_id, result.error_message)
 

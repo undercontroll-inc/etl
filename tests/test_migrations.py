@@ -180,6 +180,28 @@ class MigrationTest(unittest.TestCase):
         self.assertIn(("run_id", "external_type", "external_id"), unique_sets)
         self.assertFalse({"offer_count", "seller_count", "winner_item_id", "winner_price"} & columns)
 
+    def test_legacy_run_status_constraint_accepts_partial(self) -> None:
+        with self.engine.begin() as connection:
+            connection.execute(text(LEGACY_RUN.replace("state", "status")))
+            connection.execute(
+                text(
+                    "INSERT INTO etl_run (run_id, started_at, status, bucket_key) "
+                    "VALUES ('r1', '2026-01-01 00:00:00', 'SUCCESS', '2026-01')"
+                )
+            )
+
+        migrate(self.engine)
+
+        with self.engine.begin() as connection:
+            connection.execute(
+                text(
+                    "INSERT INTO etl_run (run_id, started_at, status, bucket_key, quality_report) "
+                    "VALUES ('r2', '2026-01-01 00:00:00', 'PARTIAL', '2026-01', '{}')"
+                )
+            )
+            statuses = connection.execute(text("SELECT status FROM etl_run ORDER BY run_id")).scalars().all()
+        self.assertEqual(["SUCCESS", "PARTIAL"], statuses)
+
     def test_views_can_be_dropped_and_recreated(self) -> None:
         migrate(self.engine)
         create_views(self.engine)

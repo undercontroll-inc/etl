@@ -8,7 +8,9 @@ from ml_etl.logging_config import get_logger
 logger = get_logger(__name__)
 
 RISING_SQL = "(" + ", ".join(f"'{label}'" for label in RISING_TRAJECTORIES) + ")"
-REFERENCE_RUN_SQL = "(SELECT r.run_id FROM etl_run r WHERE r.status = 'SUCCESS' ORDER BY r.started_at DESC LIMIT 1)"
+REFERENCE_RUN_SQL = (
+    "(SELECT r.run_id FROM etl_run r WHERE r.status IN ('SUCCESS', 'PARTIAL') ORDER BY r.started_at DESC LIMIT 1)"
+)
 
 VW_PRODUCT_CURRENT = f"""
 CREATE VIEW vw_market_product_current AS
@@ -163,7 +165,7 @@ WITH domain_bucket AS (
           FROM market_price_observation x
           JOIN etl_run r ON r.run_id = x.run_id
           WHERE x.bucket_key = p.bucket_key
-            AND r.status = 'SUCCESS'
+            AND r.status IN ('SUCCESS', 'PARTIAL')
           ORDER BY r.started_at DESC
           LIMIT 1
       )

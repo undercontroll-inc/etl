@@ -13,6 +13,8 @@ from ml_etl.pipeline import run_pipeline
 
 logger = get_logger("main")
 
+ACCEPTED_STATUSES = ("SUCCESS", "PARTIAL")
+
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -85,7 +87,9 @@ def command_run(args: argparse.Namespace) -> int:
     print(json.dumps(result.stats, indent=2, ensure_ascii=False, default=str))
     if result.error_message:
         print(f"erro: {result.error_message}", file=sys.stderr)
-    return 0 if result.status == "SUCCESS" else 1
+    if result.quality_report:
+        print(json.dumps(result.quality_report, indent=2, ensure_ascii=False, default=str))
+    return 0 if result.status in ACCEPTED_STATUSES else 1
 
 
 def command_status(args: argparse.Namespace) -> int:
