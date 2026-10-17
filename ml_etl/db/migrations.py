@@ -27,7 +27,44 @@ class Patch:
             rebuild_table(connection, table_name, self.renames.get(table_name, {}))
 
 
-PATCHES: tuple[Patch, ...] = ()
+SAMPLE_RENAMES = {
+    "seller_count": "observed_seller_count",
+    "offer_count": "available_offer_count",
+}
+
+PATCHES: tuple[Patch, ...] = (
+    Patch(
+        name="0001_offer_sample_counts",
+        postgres=(
+            "ALTER TABLE market_price_observation DROP CONSTRAINT IF EXISTS ck_price_offer_count",
+            "ALTER TABLE market_price_observation RENAME COLUMN seller_count TO observed_seller_count",
+            "ALTER TABLE market_price_observation RENAME COLUMN offer_count TO available_offer_count",
+            "ALTER TABLE market_price_observation ALTER COLUMN available_offer_count DROP NOT NULL",
+            "ALTER TABLE market_price_observation ALTER COLUMN available_offer_count DROP DEFAULT",
+            "ALTER TABLE market_price_observation RENAME COLUMN winner_item_id TO lowest_price_item_id",
+            "ALTER TABLE market_price_observation RENAME COLUMN winner_price TO lowest_price",
+            "ALTER TABLE market_price_observation ADD COLUMN observed_offer_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE market_price_observation ADD COLUMN valid_price_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE market_price_observation ADD COLUMN sample_complete BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE market_price_observation ADD CONSTRAINT ck_price_sample_counts "
+            "CHECK (valid_price_count <= observed_offer_count)",
+            "ALTER TABLE market_curated_product RENAME COLUMN seller_count TO observed_seller_count",
+            "ALTER TABLE market_curated_product RENAME COLUMN offer_count TO available_offer_count",
+            "ALTER TABLE market_curated_product ADD COLUMN observed_offer_count INTEGER",
+            "ALTER TABLE market_curated_product ADD COLUMN valid_price_count INTEGER",
+            "ALTER TABLE market_curated_product ADD COLUMN sample_complete BOOLEAN",
+        ),
+        rebuild=("market_price_observation", "market_curated_product"),
+        renames={
+            "market_price_observation": {
+                **SAMPLE_RENAMES,
+                "winner_item_id": "lowest_price_item_id",
+                "winner_price": "lowest_price",
+            },
+            "market_curated_product": SAMPLE_RENAMES,
+        },
+    ),
+)
 
 
 def rebuild_table(connection: Connection, table_name: str, renames: Mapping[str, str] | None = None) -> None:

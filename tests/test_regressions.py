@@ -68,7 +68,6 @@ class ReportRegressionTest(PipelineTestCase):
         self.assertNotIn(REMOVED_PRODUCT, current)
         self.assertEqual(len(current), len(set(current)), "a view atual nao pode misturar execucoes")
 
-    @unittest.expectedFailure
     def test_offer_total_is_not_confused_with_sample(self) -> None:
         offers = aggregate_offers(
             "PRODUCT",

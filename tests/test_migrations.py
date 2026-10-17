@@ -7,7 +7,7 @@ from sqlalchemy import Connection, create_engine, event, inspect, select, text
 from sqlalchemy.pool import StaticPool
 
 from ml_etl.db.migrations import Patch, migrate, rebuild_table
-from ml_etl.db.models import SchemaPatch
+from ml_etl.db.models import Base, SchemaPatch
 from ml_etl.db.views import VIEWS, create_views, drop_views_on
 
 
@@ -33,6 +33,27 @@ CREATE TABLE etl_run (
     error_message TEXT,
     obsolete TEXT,
     CONSTRAINT ck_etl_run_status CHECK (state IN ('RUNNING', 'SUCCESS'))
+)
+"""
+
+
+LEGACY_OBSERVATION = """
+CREATE TABLE market_price_observation (
+    id INTEGER PRIMARY KEY,
+    run_id VARCHAR(36),
+    external_type VARCHAR(20) NOT NULL,
+    external_id VARCHAR(32) NOT NULL,
+    bucket_key VARCHAR(10) NOT NULL,
+    offer_count INTEGER NOT NULL DEFAULT 0,
+    seller_count INTEGER NOT NULL DEFAULT 0,
+    official_store_count INTEGER NOT NULL DEFAULT 0,
+    price_median NUMERIC(14, 2),
+    winner_item_id VARCHAR(32),
+    winner_price NUMERIC(14, 2),
+    collected_at DATETIME NOT NULL,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    CONSTRAINT ck_price_offer_count CHECK (offer_count >= 0)
 )
 """
 
@@ -116,6 +137,34 @@ class MigrationTest(unittest.TestCase):
         patch = Patch(name="0001_pg", postgres=("SELECT missing_function()",))
         with self.engine.begin() as connection:
             patch.apply(connection)
+
+    def test_legacy_offer_columns_are_migrated(self) -> None:
+        Base.metadata.tables["etl_run"].create(self.engine)
+        with self.engine.begin() as connection:
+            connection.execute(text(LEGACY_OBSERVATION))
+            connection.execute(
+                text(
+                    "INSERT INTO market_price_observation (external_type, external_id, bucket_key, offer_count, "
+                    "seller_count, price_median, winner_item_id, winner_price, collected_at, created_at, updated_at) "
+                    "VALUES ('PRODUCT', 'MLB1', '2026-01', 18, 3, 599, 'MLB9', 526.16, "
+                    "'2026-01-01', '2026-01-01', '2026-01-01')"
+                )
+            )
+
+        applied = migrate(self.engine)
+
+        with self.engine.connect() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT available_offer_count, observed_seller_count, lowest_price_item_id, lowest_price, "
+                    "observed_offer_count, valid_price_count, sample_complete FROM market_price_observation"
+                )
+            ).one()
+            columns = {column["name"] for column in inspect(connection).get_columns("market_price_observation")}
+
+        self.assertIn("0001_offer_sample_counts", applied)
+        self.assertEqual((18, 3, "MLB9", 526.16, 0, 0, 0), tuple(row))
+        self.assertFalse({"offer_count", "seller_count", "winner_item_id", "winner_price"} & columns)
 
     def test_views_can_be_dropped_and_recreated(self) -> None:
         migrate(self.engine)

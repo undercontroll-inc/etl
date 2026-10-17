@@ -195,8 +195,11 @@ OFFER_FIELDS = (
     "price_min",
     "price_median",
     "price_max",
-    "offer_count",
-    "seller_count",
+    "available_offer_count",
+    "observed_offer_count",
+    "valid_price_count",
+    "sample_complete",
+    "observed_seller_count",
     "discount_pct_median",
 )
 

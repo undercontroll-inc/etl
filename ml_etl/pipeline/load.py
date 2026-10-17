@@ -39,6 +39,24 @@ def _optional(value: Any) -> Any:
     return value
 
 
+SAMPLE_COUNT_FIELDS = (
+    "available_offer_count",
+    "observed_offer_count",
+    "valid_price_count",
+    "observed_seller_count",
+)
+
+
+def _optional_int(value: Any) -> int | None:
+    present = _optional(value)
+    return None if present is None else int(present)
+
+
+def _optional_bool(value: Any) -> bool | None:
+    present = _optional(value)
+    return None if present is None else bool(present)
+
+
 def load_categories(session: Session, categories: dict[str, dict[str, Any]]) -> int:
     if not categories:
         return 0
@@ -95,8 +113,11 @@ def load_price_observations(
             "external_type": offer.external_type,
             "external_id": offer.external_id,
             "bucket_key": bucket_key,
-            "offer_count": offer.offer_count,
-            "seller_count": offer.seller_count,
+            "available_offer_count": offer.available_offer_count,
+            "observed_offer_count": offer.observed_offer_count,
+            "valid_price_count": offer.valid_price_count,
+            "sample_complete": offer.sample_complete,
+            "observed_seller_count": offer.observed_seller_count,
             "official_store_count": offer.official_store_count,
             "price_min": offer.price_min,
             "price_p25": offer.price_p25,
@@ -105,8 +126,8 @@ def load_price_observations(
             "price_max": offer.price_max,
             "original_price_median": offer.original_price_median,
             "discount_pct_median": offer.discount_pct_median,
-            "winner_item_id": offer.winner_item_id,
-            "winner_price": offer.winner_price,
+            "lowest_price_item_id": offer.lowest_price_item_id,
+            "lowest_price": offer.lowest_price,
             "currency_id": offer.currency_id,
             "category_id": offer.category_id,
             "collected_at": collected_at,
@@ -191,8 +212,6 @@ def load_curated(
     rows = []
     for _, row in frame.iterrows():
         rank_delta = _optional(row.get("rank_delta"))
-        offer_count = _optional(row.get("offer_count"))
-        seller_count = _optional(row.get("seller_count"))
         power_watts = _optional(row.get("power_watts"))
         category_id = _optional(row.get("enriched_category_id")) or _optional(row.get("category_id"))
         rows.append(
@@ -226,8 +245,8 @@ def load_curated(
                 "price_max": _optional(row.get("price_max")),
                 "price_delta_pct": _optional(row.get("price_delta_pct")),
                 "discount_pct": _optional(row.get("discount_pct_median")),
-                "offer_count": None if offer_count is None else int(offer_count),
-                "seller_count": None if seller_count is None else int(seller_count),
+                **{name: _optional_int(row.get(name)) for name in SAMPLE_COUNT_FIELDS},
+                "sample_complete": _optional_bool(row.get("sample_complete")),
                 "relevance": _optional(row.get("relevance")),
                 "domain_reason": _optional(row.get("domain_reason")),
                 "permalink": _optional(row.get("permalink")),

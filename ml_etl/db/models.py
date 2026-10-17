@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -13,6 +14,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -172,8 +175,17 @@ class MarketPriceObservation(Base, TimestampMixin):
     external_type: Mapped[str] = mapped_column(String(20), nullable=False)
     external_id: Mapped[str] = mapped_column(String(32), nullable=False)
     bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
-    offer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    seller_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    available_offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_offer_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    valid_price_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    sample_complete: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    observed_seller_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     official_store_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     price_min: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     price_p25: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
@@ -182,15 +194,15 @@ class MarketPriceObservation(Base, TimestampMixin):
     price_max: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     original_price_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     discount_pct_median: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
-    winner_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    winner_price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    lowest_price_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lowest_price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     currency_id: Mapped[str | None] = mapped_column(String(10), nullable=True)
     category_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
         UniqueConstraint("external_type", "external_id", "bucket_key", name="uq_price_observation_logical"),
-        CheckConstraint("offer_count >= 0", name="ck_price_offer_count"),
+        CheckConstraint("valid_price_count <= observed_offer_count", name="ck_price_sample_counts"),
         Index("ix_price_bucket", "bucket_key"),
         Index("ix_price_entity", "external_type", "external_id"),
     )
@@ -270,8 +282,11 @@ class MarketCuratedProduct(Base, TimestampMixin):
     price_max: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     price_delta_pct: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
     discount_pct: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
-    offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    seller_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    available_offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    valid_price_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    observed_seller_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     relevance: Mapped[float | None] = mapped_column(Numeric(5, 4), nullable=True)
     domain_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
     permalink: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -153,16 +153,23 @@ class PipelineSmokeTest(PipelineTestCase):
         self.assertEqual(1400, microwave.power_watts)
         self.assertEqual("220V", microwave.voltage)
         self.assertEqual("L", microwave.capacity_unit)
-        self.assertEqual(18, microwave.offer_count)
+        self.assertEqual(18, microwave.available_offer_count)
+        self.assertEqual(3, microwave.observed_offer_count)
+        self.assertEqual(3, microwave.valid_price_count)
+        self.assertFalse(microwave.sample_complete)
+        self.assertEqual(3, microwave.observed_seller_count)
         self.assertIsNotNone(microwave.price_median)
         self.assertIsNotNone(microwave.relevance)
         self.assertEqual("DOMINIO_WHITELIST", microwave.domain_reason)
 
         self.assertEqual(526.16, float(observation.price_min))
         self.assertEqual(641.90, float(observation.price_max))
-        self.assertEqual("MLB3003724516", observation.winner_item_id)
+        self.assertEqual("MLB3003724516", observation.lowest_price_item_id)
+        self.assertEqual(526.16, float(observation.lowest_price))
         self.assertEqual("MLB73057", observation.category_id)
-        self.assertEqual(3, observation.seller_count)
+        self.assertEqual(3, observation.observed_seller_count)
+        self.assertEqual(18, observation.available_offer_count)
+        self.assertFalse(observation.sample_complete)
 
     def test_blacklisted_domain_is_rejected_even_with_valid_rank(self) -> None:
         result = self._run()
@@ -279,19 +286,29 @@ class OfferAggregationTest(unittest.TestCase):
     def test_aggregates_prices_and_competition(self) -> None:
         offers = aggregate_offers("PRODUCT", "MLB1", self.PAYLOAD)
 
-        self.assertEqual(18, offers.offer_count, "offer_count deve vir de paging.total")
-        self.assertEqual(2, offers.seller_count, "vendedores repetidos contam uma vez")
+        self.assertEqual(18, offers.available_offer_count, "o total disponivel vem de paging.total")
+        self.assertEqual(3, offers.observed_offer_count)
+        self.assertEqual(3, offers.valid_price_count)
+        self.assertFalse(offers.sample_complete)
+        self.assertEqual(2, offers.observed_seller_count, "vendedores repetidos contam uma vez")
         self.assertEqual(100.0, offers.price_min)
         self.assertEqual(200.0, offers.price_median)
         self.assertEqual(300.0, offers.price_max)
-        self.assertEqual("A", offers.winner_item_id)
-        self.assertEqual(100.0, offers.winner_price)
+        self.assertEqual("A", offers.lowest_price_item_id)
+        self.assertEqual(100.0, offers.lowest_price)
         self.assertEqual(50.0, offers.discount_pct_median)
         self.assertEqual("MLB73057", offers.category_id, "deve escolher a categoria mais frequente")
 
-    def test_offer_count_falls_back_to_result_length(self) -> None:
+    def test_unknown_total_is_not_assumed_complete(self) -> None:
         offers = aggregate_offers("PRODUCT", "MLB1", {"results": self.PAYLOAD["results"]})
-        self.assertEqual(3, offers.offer_count)
+        self.assertIsNone(offers.available_offer_count)
+        self.assertEqual(3, offers.observed_offer_count)
+        self.assertFalse(offers.sample_complete)
+
+    def test_sample_is_complete_when_every_offer_was_observed(self) -> None:
+        offers = aggregate_offers("PRODUCT", "MLB1", {**self.PAYLOAD, "paging": {"total": 3}})
+        self.assertEqual(3, offers.available_offer_count)
+        self.assertTrue(offers.sample_complete)
 
     def test_ignores_non_positive_and_missing_prices(self) -> None:
         offers = aggregate_offers(
@@ -299,6 +316,8 @@ class OfferAggregationTest(unittest.TestCase):
             "MLB1",
             {"results": [{"item_id": "A", "price": 0}, {"item_id": "B", "price": None}, {"item_id": "C", "price": 50}]},
         )
+        self.assertEqual(3, offers.observed_offer_count)
+        self.assertEqual(1, offers.valid_price_count, "a mediana depende apenas dos precos validos")
         self.assertEqual(50.0, offers.price_min)
         self.assertEqual(50.0, offers.price_max)
 

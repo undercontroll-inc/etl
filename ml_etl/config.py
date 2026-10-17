@@ -130,6 +130,7 @@ class EtlSettings:
     request_timeout: int
     max_retries: int
     log_level: str
+    offers_max_pages: int = 3
 
 
 @dataclass(frozen=True)
@@ -185,6 +186,7 @@ def load_settings(
             request_timeout=_get_int("ETL_REQUEST_TIMEOUT", 30),
             max_retries=max(0, _get_int("ETL_MAX_RETRIES", 5)),
             log_level=_get("ETL_LOG_LEVEL", "INFO").upper(),
+            offers_max_pages=max(1, _get_int("ETL_OFFERS_MAX_PAGES", 3)),
         ),
         score=ScoreSettings(
             weights=_parse_weights(_get("SCORE_WEIGHTS")),

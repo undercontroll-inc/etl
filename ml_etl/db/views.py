@@ -43,8 +43,11 @@ SELECT
     c.price_max,
     c.price_delta_pct,
     c.discount_pct,
-    c.offer_count,
-    c.seller_count,
+    c.available_offer_count,
+    c.observed_offer_count,
+    c.valid_price_count,
+    c.sample_complete,
+    c.observed_seller_count,
     c.relevance,
     c.domain_reason,
     c.permalink,
@@ -79,8 +82,11 @@ SELECT
     price_max,
     price_delta_pct,
     discount_pct,
-    offer_count,
-    seller_count,
+    available_offer_count,
+    observed_offer_count,
+    valid_price_count,
+    sample_complete,
+    observed_seller_count,
     capacity_value,
     capacity_unit,
     power_watts,
@@ -104,7 +110,7 @@ SELECT
     ROUND(CAST(AVG(price_median) AS NUMERIC), 2) AS avg_price_median,
     MIN(price_min) AS price_floor,
     MAX(price_max) AS price_ceiling,
-    ROUND(CAST(AVG(offer_count) AS NUMERIC), 2) AS avg_offer_count,
+    ROUND(CAST(AVG(valid_price_count) AS NUMERIC), 2) AS avg_valid_price_count,
     ROUND(CAST(AVG(price_delta_pct) AS NUMERIC), 2) AS avg_price_delta_pct,
     ROUND(CAST(AVG(discount_pct) AS NUMERIC), 2) AS avg_discount_pct,
     SUM(CASE WHEN trajectory_label IN {RISING_SQL} THEN 1 ELSE 0 END) AS rising_count,
@@ -143,8 +149,8 @@ WITH domain_bucket AS (
         e.domain_id AS domain_id,
         p.bucket_key AS bucket_key,
         COUNT(*) AS product_count,
-        SUM(p.offer_count) AS offer_count,
-        SUM(p.seller_count) AS seller_count,
+        SUM(p.valid_price_count) AS valid_price_count,
+        SUM(p.observed_seller_count) AS observed_seller_count,
         AVG(p.price_median) AS avg_price_median
     FROM market_price_observation p
     JOIN market_entity e
@@ -159,12 +165,11 @@ with_previous AS (
         domain_id,
         bucket_key,
         product_count,
-        offer_count,
-        seller_count,
+        valid_price_count,
+        observed_seller_count,
         avg_price_median,
         LAG(avg_price_median) OVER (PARTITION BY domain_id ORDER BY bucket_key) AS previous_price_median,
-        LAG(bucket_key) OVER (PARTITION BY domain_id ORDER BY bucket_key) AS previous_bucket_key,
-        LAG(offer_count) OVER (PARTITION BY domain_id ORDER BY bucket_key) AS previous_offer_count
+        LAG(bucket_key) OVER (PARTITION BY domain_id ORDER BY bucket_key) AS previous_bucket_key
     FROM domain_bucket
 )
 SELECT
@@ -172,18 +177,14 @@ SELECT
     bucket_key,
     previous_bucket_key,
     product_count,
-    offer_count,
-    seller_count,
+    valid_price_count,
+    observed_seller_count,
     ROUND(CAST(avg_price_median AS NUMERIC), 2) AS avg_price_median,
     ROUND(CAST(previous_price_median AS NUMERIC), 2) AS previous_price_median,
     CASE
         WHEN previous_price_median IS NULL OR previous_price_median <= 0 THEN NULL
         ELSE ROUND(CAST((avg_price_median - previous_price_median) / previous_price_median * 100 AS NUMERIC), 2)
-    END AS price_delta_pct,
-    CASE
-        WHEN previous_offer_count IS NULL OR previous_offer_count <= 0 THEN NULL
-        ELSE ROUND(CAST((offer_count - previous_offer_count) * 100.0 / previous_offer_count AS NUMERIC), 2)
-    END AS offer_delta_pct
+    END AS price_delta_pct
 FROM with_previous
 """
 

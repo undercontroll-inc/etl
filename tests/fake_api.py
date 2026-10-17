@@ -339,15 +339,22 @@ class FakeMercadoLivreApi:
         body = PRODUCT_BODIES.get(product_id)
         return ApiResponse(endpoint=endpoint, params={}, status_code=200 if body else 404, payload=body)
 
-    def get_product_items(self, product_id: str) -> ApiResponse:
+    def get_product_items(self, product_id: str, offset: int = 0) -> ApiResponse:
         endpoint = f"/products/{product_id}/items"
         self._record(endpoint)
         payload = PRODUCT_OFFERS.get(product_id)
+        if payload is None:
+            return ApiResponse(endpoint=endpoint, params={}, status_code=404, payload=None)
+        limit = payload["paging"]["limit"]
+        page = {
+            "paging": {**payload["paging"], "offset": offset},
+            "results": payload["results"][offset : offset + limit],
+        }
         return ApiResponse(
             endpoint=endpoint,
-            params={},
-            status_code=200 if payload else 404,
-            payload=payload,
+            params={"offset": offset} if offset else {},
+            status_code=200,
+            payload=page,
         )
 
     def get_user_product(self, user_product_id: str) -> ApiResponse:
