@@ -43,62 +43,85 @@ class CollectedData:
     offers: dict[tuple[str, str], offers_module.ProductOffers] = field(default_factory=dict)
 
 
+def _persist_stage(
+    settings: Settings,
+    run_id: str,
+    bucket_key: str,
+    payloads: Sequence[extract.RawPayload],
+) -> None:
+    with session_scope(settings) as session:
+        raw.persist_raw(session, run_id, bucket_key, payloads)
+
+
+def _replay_payloads(settings: Settings, source_run_id: str) -> CollectedData:
+    with session_scope(settings) as session:
+        payloads = raw.load_raw_for_run(session, source_run_id)
+    entities = _entities_from_raw(payloads)
+    replayed_offers = offers_module.offers_from_raw(payloads)
+    for key, entity in entities.items():
+        enrich.apply_offers(entity, replayed_offers.get(key))
+    return CollectedData(
+        payloads=payloads,
+        entities=entities,
+        categories=enrich.categories_from_raw(payloads),
+        offers=replayed_offers,
+    )
+
+
 def _collect_payloads(
-    session,
     run_id: str,
     bucket_key: str,
     categories: Sequence[str],
     settings: Settings,
-    skip_api: bool,
     collector: RejectionCollector,
 ) -> CollectedData:
-    if skip_api:
-        payloads = raw.load_raw_for_run(session, run_id)
-        entities = _entities_from_raw(payloads)
-        replayed_offers = offers_module.offers_from_raw(payloads)
-        for key, entity in entities.items():
-            enrich.apply_offers(entity, replayed_offers.get(key))
-        return CollectedData(
-            payloads=payloads,
-            entities=entities,
-            categories=enrich.categories_from_raw(payloads),
-            offers=replayed_offers,
-        )
-
     with MercadoLivreApi(settings=settings) as api:
         extracted = extract.extract_all(api, categories, settings)
         collector.extend(extracted.rejections)
+        _persist_stage(settings, run_id, bucket_key, extracted.payloads)
 
         keys = transform.highlight_keys(extracted.payloads)
         enriched = enrich.enrich_entities(api, keys, settings)
         collector.extend(enriched.rejections)
+        _persist_stage(settings, run_id, bucket_key, enriched.payloads)
 
         catalog_keys = [key for key in enriched.entities if key[0] == enrich.TYPE_PRODUCT]
         collected_offers = offers_module.collect_offers(api, catalog_keys, settings)
         collector.extend(collected_offers.rejections)
+        _persist_stage(settings, run_id, bucket_key, collected_offers.payloads)
 
         for key, entity in enriched.entities.items():
             enrich.apply_offers(entity, collected_offers.offers.get(key))
 
+        with session_scope(settings) as session:
+            known = repository.fetch_cached_categories(session)
         entity_categories = [
             entity.category_id for entity in enriched.entities.values() if entity.category_id
         ]
         resolved = enrich.resolve_categories(
             api,
             [*categories, *entity_categories],
-            known=repository.fetch_cached_categories(session),
+            known=known,
             settings=settings,
         )
         collector.extend(resolved.rejections)
+        _persist_stage(settings, run_id, bucket_key, resolved.payloads)
 
-    payloads = [*extracted.payloads, *enriched.payloads, *collected_offers.payloads, *resolved.payloads]
-    raw.persist_raw(session, run_id, bucket_key, payloads)
     return CollectedData(
-        payloads=payloads,
+        payloads=[*extracted.payloads, *enriched.payloads, *collected_offers.payloads, *resolved.payloads],
         entities=enriched.entities,
         categories=resolved.categories,
         offers=collected_offers.offers,
     )
+
+
+def _observed_at(payloads: Sequence[extract.RawPayload], fallback: datetime) -> datetime:
+    moments = [
+        moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+        for moment in (payload.collected_at for payload in payloads)
+        if moment is not None
+    ]
+    return max(moments) if moments else fallback
 
 
 def _entities_from_raw(
@@ -185,12 +208,27 @@ def run_pipeline(
     if not skip_api:
         active.mercado_livre.require_credentials()
 
-    effective_run_id = run_id if skip_api else (run_id or str(uuid.uuid4()))
-    stats: dict[str, Any] = {
+    params: dict[str, Any] = {
         "categories": target_categories,
         "granularity": granularity,
         "skip_api": skip_api,
     }
+
+    if skip_api:
+        with session_scope(active) as session:
+            source = repository.get_run(session, run_id)
+            if source is None:
+                raise repository.RunNotFoundError(run_id)
+            params["replay_of"] = (source.params or {}).get("replay_of") or source.run_id
+            bucket_key = source.bucket_key
+        effective_run_id = str(uuid.uuid4())
+    else:
+        effective_run_id = run_id or str(uuid.uuid4())
+
+    with session_scope(active) as session:
+        repository.create_run(session, effective_run_id, bucket_key, params)
+
+    stats: dict[str, Any] = dict(params)
 
     logger.info(
         "Pipeline iniciado run_id=%s bucket=%s categorias=%s skip_api=%s",
@@ -201,25 +239,15 @@ def run_pipeline(
     )
 
     try:
+        if skip_api:
+            collected = _replay_payloads(active, params["replay_of"])
+            observed_at = _observed_at(collected.payloads, started_at)
+        else:
+            collected = _collect_payloads(effective_run_id, bucket_key, target_categories, active, collector)
+            observed_at = started_at
+        stats["raw_payloads"] = len(collected.payloads)
+
         with session_scope(active) as session:
-            if skip_api:
-                previous_run = repository.get_run(session, effective_run_id)
-                if previous_run is None:
-                    raise ValueError(f"run_id {effective_run_id} não encontrado para reprocessamento")
-                bucket_key = previous_run.bucket_key
-            else:
-                repository.create_run(session, effective_run_id, bucket_key, stats)
-
-            collected = _collect_payloads(
-                session,
-                effective_run_id,
-                bucket_key,
-                target_categories,
-                active,
-                skip_api,
-                collector,
-            )
-
             previous = _previous_ranks(session, bucket_key)
             previous_medians = repository.fetch_previous_price_medians(session, bucket_key)
             transformed = transform.build_transform_result(
@@ -242,13 +270,12 @@ def run_pipeline(
 
             stats.update(
                 {
-                    "raw_payloads": len(collected.payloads),
                     "entities": load.load_entities(session, collected.entities),
                     "categories_loaded": load.load_categories(session, collected.categories),
                     "snapshots": load.load_snapshots(session, transformed.highlights, effective_run_id, bucket_key),
                     "trends": load.load_trends(session, transformed.trends, effective_run_id, bucket_key),
                     "price_observations": load.load_price_observations(
-                        session, collected.offers, effective_run_id, bucket_key, started_at
+                        session, collected.offers, effective_run_id, bucket_key, observed_at
                     ),
                     "scores": load.load_scores(session, scored, effective_run_id, bucket_key),
                     "curated": load.load_curated(session, scored, effective_run_id, bucket_key, category_names),
@@ -266,11 +293,11 @@ def run_pipeline(
 
     except Exception as exc:
         logger.exception("Pipeline falhou run_id=%s", effective_run_id)
-        try:
-            with session_scope(active) as session:
-                repository.finish_run(session, effective_run_id, "FAILED", stats, str(exc)[:2000])
-        except Exception:
-            logger.error("Não foi possível registrar a falha do run %s", effective_run_id)
+        stats["rejections"] = len(collector)
+        stats["rejections_by_rule"] = collector.summary()
+        with session_scope(active) as session:
+            load.load_rejections(session, collector.rows(effective_run_id))
+            repository.finish_run(session, effective_run_id, "FAILED", stats, str(exc)[:2000])
         return PipelineResult(
             run_id=effective_run_id,
             bucket_key=bucket_key,

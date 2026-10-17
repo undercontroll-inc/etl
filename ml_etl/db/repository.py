@@ -27,6 +27,12 @@ logger = get_logger(__name__)
 
 CHUNK_SIZE = 500
 
+
+class RunNotFoundError(LookupError):
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run_id {run_id} não encontrado")
+        self.run_id = run_id
+
 UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
     MarketCategory: (
         ("category_id",),
@@ -208,7 +214,7 @@ def finish_run(
 ) -> None:
     run = session.get(EtlRun, run_id)
     if run is None:
-        return
+        raise RunNotFoundError(run_id)
     run.status = status
     run.stats = stats
     run.error_message = error_message

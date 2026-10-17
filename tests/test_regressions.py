@@ -18,7 +18,6 @@ REMOVED_PRODUCT = "MLB19617678"
 
 
 class ReportRegressionTest(PipelineTestCase):
-    @unittest.expectedFailure
     def test_failure_after_collection_keeps_run_and_raw(self) -> None:
         with mock.patch.object(
             orchestrator.score, "score_highlights", side_effect=RuntimeError("injected failure")

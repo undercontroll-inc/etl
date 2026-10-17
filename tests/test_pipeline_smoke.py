@@ -118,7 +118,8 @@ class PipelineSmokeTest(PipelineTestCase):
 
         replay = self._run(run_id=first.run_id, skip_api=True)
         self.assertEqual("SUCCESS", replay.status, replay.error_message)
-        self.assertEqual(first.run_id, replay.run_id)
+        self.assertNotEqual(first.run_id, replay.run_id)
+        self.assertEqual(first.run_id, replay.stats["replay_of"])
         self.assertEqual(first.stats["curated"], replay.stats["curated"])
 
         with session_scope(self.settings) as session:

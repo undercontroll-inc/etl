@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import unittest
 from unittest import mock
@@ -16,6 +17,7 @@ class PipelineTestCase(unittest.TestCase):
     extra_env: dict[str, str] = {}
 
     def setUp(self) -> None:
+        logging.disable(logging.CRITICAL)
         self._env = dict(os.environ)
         os.environ.clear()
         os.environ.update(
@@ -40,6 +42,7 @@ class PipelineTestCase(unittest.TestCase):
         config_module.reset_settings_cache()
         os.environ.clear()
         os.environ.update(self._env)
+        logging.disable(logging.NOTSET)
 
     def _run(self, **kwargs):
         with mock.patch.object(orchestrator, "MercadoLivreApi", FakeMercadoLivreApi):
