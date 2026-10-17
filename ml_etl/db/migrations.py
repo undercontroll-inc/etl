@@ -17,14 +17,17 @@ class Patch:
     postgres: tuple[str, ...] = ()
     rebuild: tuple[str, ...] = ()
     renames: Mapping[str, Mapping[str, str]] = field(default_factory=dict)
+    portable: tuple[str, ...] = ()
 
     def apply(self, connection: Connection) -> None:
         if connection.dialect.name == "postgresql":
             for statement in self.postgres:
                 connection.execute(text(statement))
-            return
-        for table_name in self.rebuild:
-            rebuild_table(connection, table_name, self.renames.get(table_name, {}))
+        else:
+            for table_name in self.rebuild:
+                rebuild_table(connection, table_name, self.renames.get(table_name, {}))
+        for statement in self.portable:
+            connection.execute(text(statement))
 
 
 SAMPLE_RENAMES = {
@@ -63,6 +66,45 @@ PATCHES: tuple[Patch, ...] = (
             },
             "market_curated_product": SAMPLE_RENAMES,
         },
+    ),
+    Patch(
+        name="0002_run_scoped_rows",
+        postgres=(
+            "ALTER TABLE market_snapshot DROP CONSTRAINT IF EXISTS uq_snapshot_logical",
+            "ALTER TABLE market_snapshot ADD CONSTRAINT uq_snapshot_run "
+            "UNIQUE (run_id, source, external_type, external_id, category_id)",
+            "CREATE INDEX IF NOT EXISTS ix_snapshot_run ON market_snapshot (run_id)",
+            "ALTER TABLE market_trend DROP CONSTRAINT IF EXISTS uq_trend_logical",
+            "ALTER TABLE market_trend ADD CONSTRAINT uq_trend_run UNIQUE (run_id, category_id, keyword)",
+            "CREATE INDEX IF NOT EXISTS ix_trend_run ON market_trend (run_id)",
+            "ALTER TABLE market_score DROP CONSTRAINT IF EXISTS uq_score_logical",
+            "ALTER TABLE market_score ADD CONSTRAINT uq_score_run UNIQUE (run_id, external_type, external_id)",
+            "CREATE INDEX IF NOT EXISTS ix_score_run ON market_score (run_id)",
+            "ALTER TABLE market_price_observation DROP CONSTRAINT IF EXISTS uq_price_observation_logical",
+            "ALTER TABLE market_price_observation ADD CONSTRAINT uq_price_observation_run "
+            "UNIQUE (run_id, external_type, external_id)",
+            "CREATE INDEX IF NOT EXISTS ix_price_run ON market_price_observation (run_id)",
+            "ALTER TABLE market_price_observation ADD COLUMN IF NOT EXISTS domain_id VARCHAR(64)",
+            "CREATE INDEX IF NOT EXISTS ix_price_domain ON market_price_observation (domain_id)",
+            "ALTER TABLE market_curated_product DROP CONSTRAINT IF EXISTS uq_curated_logical",
+            "ALTER TABLE market_curated_product ADD CONSTRAINT uq_curated_run "
+            "UNIQUE (run_id, source, external_type, external_id)",
+            "CREATE INDEX IF NOT EXISTS ix_curated_run ON market_curated_product (run_id)",
+        ),
+        rebuild=(
+            "market_snapshot",
+            "market_trend",
+            "market_score",
+            "market_price_observation",
+            "market_curated_product",
+        ),
+        portable=(
+            "UPDATE market_price_observation SET domain_id = ("
+            "SELECT e.domain_id FROM market_entity e "
+            "WHERE e.external_type = market_price_observation.external_type "
+            "AND e.external_id = market_price_observation.external_id"
+            ") WHERE domain_id IS NULL",
+        ),
     ),
 )
 

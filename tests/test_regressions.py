@@ -46,7 +46,6 @@ class ReportRegressionTest(PipelineTestCase):
             run = session.get(EtlRun, result.run_id)
         self.assertEqual("FAILED", run.status)
 
-    @unittest.expectedFailure
     def test_product_missing_from_new_run_leaves_current_view(self) -> None:
         first = self._run()
         self.assertIn(first.status, ("SUCCESS", "PARTIAL"), first.error_message)

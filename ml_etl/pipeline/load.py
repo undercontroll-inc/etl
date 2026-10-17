@@ -103,9 +103,12 @@ def load_price_observations(
     run_id: str,
     bucket_key: str,
     collected_at: datetime,
+    entities: dict[tuple[str, str], EnrichedEntity] | None = None,
 ) -> int:
     if not offers:
         return 0
+
+    known = entities or {}
 
     rows = [
         {
@@ -130,6 +133,7 @@ def load_price_observations(
             "lowest_price": offer.lowest_price,
             "currency_id": offer.currency_id,
             "category_id": offer.category_id,
+            "domain_id": known[offer.key].domain_id if offer.key in known else None,
             "collected_at": collected_at,
         }
         for offer in offers.values()

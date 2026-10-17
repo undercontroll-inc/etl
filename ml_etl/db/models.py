@@ -158,8 +158,9 @@ class MarketSnapshot(Base, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint(
-            "source", "external_type", "external_id", "category_id", "bucket_key", name="uq_snapshot_logical"
+            "run_id", "source", "external_type", "external_id", "category_id", name="uq_snapshot_run"
         ),
+        Index("ix_snapshot_run", "run_id"),
         CheckConstraint("rank BETWEEN 1 AND 20", name="ck_snapshot_rank_range"),
         CheckConstraint(f"external_type IN {EXTERNAL_TYPES}", name="ck_snapshot_external_type"),
         Index("ix_snapshot_bucket", "bucket_key"),
@@ -198,10 +199,13 @@ class MarketPriceObservation(Base, TimestampMixin):
     lowest_price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     currency_id: Mapped[str | None] = mapped_column(String(10), nullable=True)
     category_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    domain_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("external_type", "external_id", "bucket_key", name="uq_price_observation_logical"),
+        UniqueConstraint("run_id", "external_type", "external_id", name="uq_price_observation_run"),
+        Index("ix_price_run", "run_id"),
+        Index("ix_price_domain", "domain_id"),
         CheckConstraint("valid_price_count <= observed_offer_count", name="ck_price_sample_counts"),
         Index("ix_price_bucket", "bucket_key"),
         Index("ix_price_entity", "external_type", "external_id"),
@@ -222,7 +226,8 @@ class MarketTrend(Base, TimestampMixin):
     bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("category_id", "keyword", "bucket_key", name="uq_trend_logical"),
+        UniqueConstraint("run_id", "category_id", "keyword", name="uq_trend_run"),
+        Index("ix_trend_run", "run_id"),
         Index("ix_trend_bucket", "bucket_key"),
         Index("ix_trend_canonical", "canonical_keyword"),
     )
@@ -243,7 +248,8 @@ class MarketScore(Base, TimestampMixin):
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("external_type", "external_id", "bucket_key", name="uq_score_logical"),
+        UniqueConstraint("run_id", "external_type", "external_id", name="uq_score_run"),
+        Index("ix_score_run", "run_id"),
         CheckConstraint("score >= 0 AND score <= 100", name="ck_score_range"),
         Index("ix_score_bucket", "bucket_key"),
     )
@@ -298,7 +304,8 @@ class MarketCuratedProduct(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        UniqueConstraint("source", "external_type", "external_id", "bucket_key", name="uq_curated_logical"),
+        UniqueConstraint("run_id", "source", "external_type", "external_id", name="uq_curated_run"),
+        Index("ix_curated_run", "run_id"),
         CheckConstraint("rank BETWEEN 1 AND 20", name="ck_curated_rank_range"),
         CheckConstraint("score >= 0 AND score <= 100", name="ck_curated_score_range"),
         Index("ix_curated_bucket_score", "bucket_key", "score"),

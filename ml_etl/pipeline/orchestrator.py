@@ -275,7 +275,7 @@ def run_pipeline(
                     "snapshots": load.load_snapshots(session, transformed.highlights, effective_run_id, bucket_key),
                     "trends": load.load_trends(session, transformed.trends, effective_run_id, bucket_key),
                     "price_observations": load.load_price_observations(
-                        session, collected.offers, effective_run_id, bucket_key, observed_at
+                        session, collected.offers, effective_run_id, bucket_key, observed_at, collected.entities
                     ),
                     "scores": load.load_scores(session, scored, effective_run_id, bucket_key),
                     "curated": load.load_curated(session, scored, effective_run_id, bucket_key, category_names),

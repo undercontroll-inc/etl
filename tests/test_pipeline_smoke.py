@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from datetime import datetime, timezone
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
 from ml_etl.db import session_scope
 from ml_etl.db.models import EtlRejection, MarketCuratedProduct, MarketPriceObservation, MarketSnapshot
@@ -19,11 +19,13 @@ from tests.support import PipelineTestCase
 
 class PipelineSmokeTest(PipelineTestCase):
     @staticmethod
-    def _curated_scores(session, bucket_key: str) -> dict[str, float]:
-        rows = session.execute(
-            select(MarketCuratedProduct).where(MarketCuratedProduct.bucket_key == bucket_key)
-        ).scalars()
+    def _curated_scores(session, run_id: str) -> dict[str, float]:
+        rows = session.execute(select(MarketCuratedProduct).where(MarketCuratedProduct.run_id == run_id)).scalars()
         return {f"{row.external_type}:{row.external_id}": float(row.score) for row in rows}
+
+    @staticmethod
+    def _rows_per_run(session, model, run_id: str) -> int:
+        return session.execute(select(func.count()).select_from(model).where(model.run_id == run_id)).scalar()
 
     def test_pipeline_runs_end_to_end(self) -> None:
         result = self._run()
@@ -52,7 +54,7 @@ class PipelineSmokeTest(PipelineTestCase):
 
         with session_scope(self.settings) as session:
             baseline = table_counts(session)
-            baseline_scores = self._curated_scores(session, first.bucket_key)
+            baseline_scores = self._curated_scores(session, first.run_id)
 
         second = self._run()
         third = self._run()
@@ -61,21 +63,20 @@ class PipelineSmokeTest(PipelineTestCase):
 
         with session_scope(self.settings) as session:
             after = table_counts(session)
-            after_scores = self._curated_scores(session, first.bucket_key)
+            for run in (second, third):
+                self.assertEqual(baseline_scores, self._curated_scores(session, run.run_id))
+                for model in (MarketSnapshot, MarketPriceObservation, MarketCuratedProduct):
+                    self.assertEqual(
+                        self._rows_per_run(session, model, first.run_id),
+                        self._rows_per_run(session, model, run.run_id),
+                        f"{model.__tablename__} mudou entre execucoes do mesmo bucket",
+                    )
+            current = session.execute(text("SELECT external_id FROM vw_market_product_current")).scalars().all()
 
-        self.assertEqual(baseline_scores, after_scores, "os scores mudaram entre reexecucoes do mesmo bucket")
-
-        for table in (
-            "market_entity",
-            "market_snapshot",
-            "market_trend",
-            "market_price_observation",
-            "market_score",
-            "market_curated_product",
-            "market_category",
-        ):
+        for table in ("market_entity", "market_category"):
             self.assertEqual(baseline[table], after[table], f"tabela {table} duplicou linhas")
-
+        self.assertEqual(3 * baseline["market_snapshot"], after["market_snapshot"], "cada execucao e imutavel")
+        self.assertEqual(len(baseline_scores), len(current), "a view atual expoe apenas uma execucao")
         self.assertEqual(3, after["etl_run"])
 
     def test_invalid_domain_rows_are_rejected(self) -> None:
@@ -123,10 +124,15 @@ class PipelineSmokeTest(PipelineTestCase):
         self.assertEqual(first.stats["curated"], replay.stats["curated"])
 
         with session_scope(self.settings) as session:
-            after = table_counts(session)
+            replayed_curated = self._rows_per_run(session, MarketCuratedProduct, replay.run_id)
+            replayed_snapshots = self._rows_per_run(session, MarketSnapshot, replay.run_id)
+            original_scores = self._curated_scores(session, first.run_id)
+            replayed_scores = self._curated_scores(session, replay.run_id)
 
-        self.assertEqual(baseline["market_curated_product"], after["market_curated_product"])
-        self.assertEqual(baseline["market_snapshot"], after["market_snapshot"])
+        self.assertTrue(original_scores)
+        self.assertEqual(original_scores, replayed_scores)
+        self.assertEqual(baseline["market_curated_product"], replayed_curated)
+        self.assertEqual(baseline["market_snapshot"], replayed_snapshots)
 
     def test_skip_api_requires_run_id(self) -> None:
         with self.assertRaises(ValueError):
@@ -207,7 +213,7 @@ class PipelineSmokeTest(PipelineTestCase):
             microwave = session.execute(
                 select(MarketCuratedProduct).where(
                     MarketCuratedProduct.external_id == "MLB19617678",
-                    MarketCuratedProduct.bucket_key == second.bucket_key,
+                    MarketCuratedProduct.run_id == second.run_id,
                 )
             ).scalar_one()
 
@@ -242,9 +248,9 @@ class PipelineSmokeTest(PipelineTestCase):
         self.assertEqual(first.stats["price_observations"], replay.stats["price_observations"])
 
         with session_scope(self.settings) as session:
-            after = table_counts(session)["market_price_observation"]
+            replayed = self._rows_per_run(session, MarketPriceObservation, replay.run_id)
 
-        self.assertEqual(baseline, after)
+        self.assertEqual(baseline, replayed)
 
     def test_trajectory_and_confidence_use_previous_bucket(self) -> None:
         first = self._run()
@@ -263,7 +269,7 @@ class PipelineSmokeTest(PipelineTestCase):
 
         with session_scope(self.settings) as session:
             curated = session.execute(
-                select(MarketCuratedProduct).where(MarketCuratedProduct.bucket_key == second.bucket_key)
+                select(MarketCuratedProduct).where(MarketCuratedProduct.run_id == second.run_id)
             ).scalars().all()
 
         self.assertTrue(curated)

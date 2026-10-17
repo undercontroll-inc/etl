@@ -140,8 +140,16 @@ class MigrationTest(unittest.TestCase):
 
     def test_legacy_offer_columns_are_migrated(self) -> None:
         Base.metadata.tables["etl_run"].create(self.engine)
+        Base.metadata.tables["market_entity"].create(self.engine)
         with self.engine.begin() as connection:
             connection.execute(text(LEGACY_OBSERVATION))
+            connection.execute(
+                text(
+                    "INSERT INTO market_entity (external_type, external_id, title, domain_id, enrich_status, "
+                    "first_seen_at, created_at, updated_at) VALUES ('PRODUCT', 'MLB1', 'Micro-ondas', "
+                    "'MLB-MICROWAVES', 'OK', '2026-01-01', '2026-01-01', '2026-01-01')"
+                )
+            )
             connection.execute(
                 text(
                     "INSERT INTO market_price_observation (external_type, external_id, bucket_key, offer_count, "
@@ -157,13 +165,19 @@ class MigrationTest(unittest.TestCase):
             row = connection.execute(
                 text(
                     "SELECT available_offer_count, observed_seller_count, lowest_price_item_id, lowest_price, "
-                    "observed_offer_count, valid_price_count, sample_complete FROM market_price_observation"
+                    "observed_offer_count, valid_price_count, sample_complete, domain_id "
+                    "FROM market_price_observation"
                 )
             ).one()
+            unique_sets = {
+                tuple(item["column_names"])
+                for item in inspect(connection).get_unique_constraints("market_price_observation")
+            }
             columns = {column["name"] for column in inspect(connection).get_columns("market_price_observation")}
 
         self.assertIn("0001_offer_sample_counts", applied)
-        self.assertEqual((18, 3, "MLB9", 526.16, 0, 0, 0), tuple(row))
+        self.assertEqual((18, 3, "MLB9", 526.16, 0, 0, 0, "MLB-MICROWAVES"), tuple(row))
+        self.assertIn(("run_id", "external_type", "external_id"), unique_sets)
         self.assertFalse({"offer_count", "seller_count", "winner_item_id", "winner_price"} & columns)
 
     def test_views_can_be_dropped_and_recreated(self) -> None:

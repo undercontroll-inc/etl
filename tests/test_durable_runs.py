@@ -3,13 +3,20 @@ from __future__ import annotations
 import unittest
 from unittest import mock
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 
 from ml_etl.db import session_scope
-from ml_etl.db.models import EtlRejection, EtlRun, MarketPriceObservation, MarketRawResponse
-from ml_etl.db.repository import RunNotFoundError, finish_run
+from ml_etl.db.models import EtlRejection, EtlRun, MarketPriceObservation, MarketRawResponse, MarketSnapshot
+from ml_etl.db.repository import RunNotFoundError, count_prior_buckets, fetch_previous_snapshots, finish_run
+from ml_etl.domain.buckets import previous_bucket_key
 from ml_etl.pipeline import orchestrator
 from tests.support import PipelineTestCase
+
+
+def first_collected_at(session, run_id: str):
+    return session.execute(
+        select(MarketSnapshot.collected_at).where(MarketSnapshot.run_id == run_id).limit(1)
+    ).scalar()
 
 
 class DurableRunTest(PipelineTestCase):
@@ -65,7 +72,9 @@ class DurableRunTest(PipelineTestCase):
                 select(func.count()).select_from(EtlRejection).where(EtlRejection.run_id == first.run_id)
             ).scalar()
             observation_moment = session.execute(
-                select(MarketPriceObservation.collected_at).limit(1)
+                select(MarketPriceObservation.collected_at)
+                .where(MarketPriceObservation.run_id == replay.run_id)
+                .limit(1)
             ).scalar()
             raw_moment = session.execute(
                 select(func.max(MarketRawResponse.collected_at)).where(MarketRawResponse.run_id == first.run_id)
@@ -78,6 +87,36 @@ class DurableRunTest(PipelineTestCase):
         self.assertEqual(0, self._raw_stages(replay.run_id).get("EXTRACT", 0), "replay nao duplica RAW")
         self.assertLess(replay_rejections, first_rejections, "replay registra apenas as proprias rejeicoes")
         self.assertEqual(raw_moment.replace(tzinfo=None), observation_moment.replace(tzinfo=None))
+
+    def test_previous_bucket_ignores_failed_runs(self) -> None:
+        first = self._run()
+        previous = previous_bucket_key(first.bucket_key, "month")
+        with session_scope(self.settings) as session:
+            session.execute(
+                update(MarketSnapshot).where(MarketSnapshot.run_id == first.run_id).values(bucket_key=previous)
+            )
+            session.add(EtlRun(run_id="failed", bucket_key=previous, status="FAILED"))
+            session.flush()
+            session.add(
+                MarketSnapshot(
+                    run_id="failed",
+                    source="HIGHLIGHTS_CATEGORY",
+                    external_type="PRODUCT",
+                    external_id="MLB19617678",
+                    category_id="MLB5726",
+                    rank=20,
+                    rank_band="MODERADO",
+                    collected_at=first_collected_at(session, first.run_id),
+                    bucket_key=previous,
+                )
+            )
+
+        with session_scope(self.settings) as session:
+            ranks = {row.external_id: row.rank for row in fetch_previous_snapshots(session, first.bucket_key)}
+            prior = count_prior_buckets(session, first.bucket_key)
+
+        self.assertEqual(2, ranks["MLB19617678"], "a execucao FAILED nao serve de referencia")
+        self.assertEqual(1, prior[("PRODUCT", "MLB19617678")])
 
     def test_replay_of_unknown_run_raises(self) -> None:
         with self.assertRaises(RunNotFoundError):

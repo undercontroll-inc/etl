@@ -8,8 +8,9 @@ from ml_etl.logging_config import get_logger
 logger = get_logger(__name__)
 
 RISING_SQL = "(" + ", ".join(f"'{label}'" for label in RISING_TRAJECTORIES) + ")"
+REFERENCE_RUN_SQL = "(SELECT r.run_id FROM etl_run r WHERE r.status = 'SUCCESS' ORDER BY r.started_at DESC LIMIT 1)"
 
-VW_PRODUCT_CURRENT = """
+VW_PRODUCT_CURRENT = f"""
 CREATE VIEW vw_market_product_current AS
 SELECT
     c.bucket_key,
@@ -53,7 +54,7 @@ SELECT
     c.permalink,
     c.collected_at
 FROM market_curated_product c
-WHERE c.bucket_key = (SELECT MAX(bucket_key) FROM market_curated_product)
+WHERE c.run_id = {REFERENCE_RUN_SQL}
 """
 
 VW_RISING_PRODUCTS = f"""
@@ -118,6 +119,7 @@ SELECT
     SUM(CASE WHEN confidence = 'HIGH' THEN 1 ELSE 0 END) AS high_confidence_count
 FROM market_curated_product
 WHERE domain_id IS NOT NULL
+  AND run_id = {REFERENCE_RUN_SQL}
 GROUP BY domain_id, bucket_key
 """
 
@@ -139,6 +141,7 @@ SELECT
     SUM(CASE WHEN trajectory_label IN {RISING_SQL} THEN 1 ELSE 0 END) AS rising_count
 FROM market_curated_product
 WHERE brand_slug IS NOT NULL
+  AND run_id = {REFERENCE_RUN_SQL}
 GROUP BY brand_slug, bucket_key
 """
 
@@ -146,19 +149,25 @@ VW_PRICE_MOVEMENT = """
 CREATE VIEW vw_market_price_movement AS
 WITH domain_bucket AS (
     SELECT
-        e.domain_id AS domain_id,
+        p.domain_id AS domain_id,
         p.bucket_key AS bucket_key,
         COUNT(*) AS product_count,
         SUM(p.valid_price_count) AS valid_price_count,
         SUM(p.observed_seller_count) AS observed_seller_count,
         AVG(p.price_median) AS avg_price_median
     FROM market_price_observation p
-    JOIN market_entity e
-      ON e.external_type = p.external_type
-     AND e.external_id = p.external_id
-    WHERE e.domain_id IS NOT NULL
+    WHERE p.domain_id IS NOT NULL
       AND p.price_median IS NOT NULL
-    GROUP BY e.domain_id, p.bucket_key
+      AND p.run_id = (
+          SELECT x.run_id
+          FROM market_price_observation x
+          JOIN etl_run r ON r.run_id = x.run_id
+          WHERE x.bucket_key = p.bucket_key
+            AND r.status = 'SUCCESS'
+          ORDER BY r.started_at DESC
+          LIMIT 1
+      )
+    GROUP BY p.domain_id, p.bucket_key
 ),
 with_previous AS (
     SELECT
