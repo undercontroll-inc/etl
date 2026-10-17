@@ -9,7 +9,7 @@ from typing import Any
 from ml_etl.api.http_client import ApiError
 from ml_etl.api.mercado_livre import MercadoLivreApi
 from ml_etl.config import Settings, get_settings
-from ml_etl.domain.rejection import EMPTY_PAYLOAD, Layer, Rejection, Severity, Stage
+from ml_etl.domain.rejection import EMPTY_PAYLOAD, Layer, Rejection, Stage
 from ml_etl.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -61,11 +61,10 @@ def extract_categories(api: MercadoLivreApi, category_ids: Sequence[str], settin
             response = api.get_category(category_id)
         except ApiError as exc:
             local.rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.EXTRACT,
                     layer=Layer.ESTRUTURAL,
                     rule=f"falha ao consultar /categories/{category_id}",
-                    severity=Severity.AVISO,
                     external_id=category_id,
                     detail=str(exc),
                 )
@@ -73,11 +72,10 @@ def extract_categories(api: MercadoLivreApi, category_ids: Sequence[str], settin
             return local
         if not response.payload:
             local.rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.EXTRACT,
                     layer=Layer.ESTRUTURAL,
                     rule=EMPTY_PAYLOAD,
-                    severity=Severity.AVISO,
                     external_id=category_id,
                     detail=f"/categories/{category_id} retornou vazio",
                 )
@@ -111,11 +109,10 @@ def extract_highlights(api: MercadoLivreApi, category_ids: Sequence[str], settin
             response = api.get_highlights_by_category(category_id)
         except ApiError as exc:
             local.rejections.append(
-                Rejection(
+                Rejection.blocking(
                     stage=Stage.EXTRACT,
                     layer=Layer.API_LIMITE if exc.status_code == 429 else Layer.ESTRUTURAL,
                     rule=f"falha ao consultar highlights de {category_id}",
-                    severity=Severity.BLOQUEANTE,
                     external_id=category_id,
                     detail=str(exc),
                 )
@@ -125,11 +122,10 @@ def extract_highlights(api: MercadoLivreApi, category_ids: Sequence[str], settin
         content = (response.payload or {}).get("content") if isinstance(response.payload, dict) else None
         if not content:
             local.rejections.append(
-                Rejection(
+                Rejection.blocking(
                     stage=Stage.EXTRACT,
                     layer=Layer.ESTRUTURAL,
                     rule=EMPTY_PAYLOAD,
-                    severity=Severity.BLOQUEANTE,
                     external_id=category_id,
                     detail=f"highlights de {category_id} sem content",
                 )
@@ -167,11 +163,10 @@ def extract_trends(api: MercadoLivreApi, category_ids: Sequence[str], settings: 
             response = api.get_trends(category_id)
         except ApiError as exc:
             local.rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.EXTRACT,
                     layer=Layer.API_LIMITE if exc.status_code == 429 else Layer.ESTRUTURAL,
                     rule=f"falha ao consultar trends de {label}",
-                    severity=Severity.AVISO,
                     external_id=category_id,
                     detail=str(exc),
                 )
@@ -180,11 +175,10 @@ def extract_trends(api: MercadoLivreApi, category_ids: Sequence[str], settings: 
 
         if not response.payload:
             local.rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.EXTRACT,
                     layer=Layer.ESTRUTURAL,
                     rule=EMPTY_PAYLOAD,
-                    severity=Severity.AVISO,
                     external_id=category_id,
                     detail=f"trends de {label} retornou vazio",
                 )

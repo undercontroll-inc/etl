@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from sqlalchemy import Engine, text
 
+from ml_etl.domain.buckets import RISING_TRAJECTORIES
 from ml_etl.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-RISING_TRAJECTORIES = "('CRESCIMENTO', 'CRESCIMENTO_FORTE')"
+RISING_SQL = "(" + ", ".join(f"'{label}'" for label in RISING_TRAJECTORIES) + ")"
 
 VW_PRODUCT_CURRENT = """
 CREATE VIEW vw_market_product_current AS
@@ -86,11 +87,11 @@ SELECT
     voltage,
     permalink
 FROM vw_market_product_current
-WHERE trajectory_label IN {RISING_TRAJECTORIES}
+WHERE trajectory_label IN {RISING_SQL}
    OR priority_label = 'PRIORIDADE_ALTA'
 """
 
-VW_CATEGORY_SUMMARY = """
+VW_CATEGORY_SUMMARY = f"""
 CREATE VIEW vw_market_category_summary AS
 SELECT
     domain_id,
@@ -106,7 +107,7 @@ SELECT
     ROUND(CAST(AVG(offer_count) AS NUMERIC), 2) AS avg_offer_count,
     ROUND(CAST(AVG(price_delta_pct) AS NUMERIC), 2) AS avg_price_delta_pct,
     ROUND(CAST(AVG(discount_pct) AS NUMERIC), 2) AS avg_discount_pct,
-    SUM(CASE WHEN trajectory_label IN ('CRESCIMENTO', 'CRESCIMENTO_FORTE') THEN 1 ELSE 0 END) AS rising_count,
+    SUM(CASE WHEN trajectory_label IN {RISING_SQL} THEN 1 ELSE 0 END) AS rising_count,
     SUM(CASE WHEN trajectory_label = 'QUEDA' THEN 1 ELSE 0 END) AS falling_count,
     SUM(CASE WHEN confidence = 'HIGH' THEN 1 ELSE 0 END) AS high_confidence_count
 FROM market_curated_product
@@ -114,7 +115,7 @@ WHERE domain_id IS NOT NULL
 GROUP BY domain_id, bucket_key
 """
 
-VW_BRAND_SUMMARY = """
+VW_BRAND_SUMMARY = f"""
 CREATE VIEW vw_market_brand_summary AS
 SELECT
     brand_slug,
@@ -129,7 +130,7 @@ SELECT
     MAX(price_max) AS price_ceiling,
     ROUND(CAST(AVG(price_delta_pct) AS NUMERIC), 2) AS avg_price_delta_pct,
     ROUND(CAST(AVG(discount_pct) AS NUMERIC), 2) AS avg_discount_pct,
-    SUM(CASE WHEN trajectory_label IN ('CRESCIMENTO', 'CRESCIMENTO_FORTE') THEN 1 ELSE 0 END) AS rising_count
+    SUM(CASE WHEN trajectory_label IN {RISING_SQL} THEN 1 ELSE 0 END) AS rising_count
 FROM market_curated_product
 WHERE brand_slug IS NOT NULL
 GROUP BY brand_slug, bucket_key

@@ -18,7 +18,6 @@ from ml_etl.domain.rejection import (
     RANK_OUT_OF_RANGE,
     Layer,
     Rejection,
-    Severity,
     Stage,
 )
 from ml_etl.logging_config import get_logger
@@ -113,11 +112,10 @@ def validate_highlights(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[Rejecti
     null_required = working["external_id"].isna() | working["source"].isna() | working["collected_at"].isna()
     for _, row in working[null_required].iterrows():
         rejections.append(
-            Rejection(
+            Rejection.blocking(
                 stage=Stage.TRANSFORM,
                 layer=Layer.INTEGRIDADE,
                 rule=NULL_REQUIRED_FIELD,
-                severity=Severity.BLOQUEANTE,
                 external_type=row.get("external_type"),
                 external_id=row.get("external_id"),
                 detail="campo obrigatorio nulo no snapshot",
@@ -128,11 +126,10 @@ def validate_highlights(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[Rejecti
     invalid_type = ~working["external_type"].isin(EXTERNAL_TYPES)
     for _, row in working[invalid_type].iterrows():
         rejections.append(
-            Rejection(
+            Rejection.blocking(
                 stage=Stage.TRANSFORM,
                 layer=Layer.DOMINIO,
                 rule=INVALID_EXTERNAL_TYPE,
-                severity=Severity.BLOQUEANTE,
                 external_type=row.get("external_type"),
                 external_id=row.get("external_id"),
                 detail=f"external_type recebido: {row.get('external_type')!r}",
@@ -143,11 +140,10 @@ def validate_highlights(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[Rejecti
     invalid_rank = working["rank"].isna() | (working["rank"] < 1) | (working["rank"] > 20)
     for _, row in working[invalid_rank].iterrows():
         rejections.append(
-            Rejection(
+            Rejection.blocking(
                 stage=Stage.TRANSFORM,
                 layer=Layer.DOMINIO,
                 rule=RANK_OUT_OF_RANGE,
-                severity=Severity.BLOQUEANTE,
                 external_type=row.get("external_type"),
                 external_id=row.get("external_id"),
                 detail=f"rank recebido: {row.get('rank')!r}",
@@ -158,11 +154,10 @@ def validate_highlights(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[Rejecti
     missing_category = working["category_id"].isna()
     for _, row in working[missing_category].iterrows():
         rejections.append(
-            Rejection(
+            Rejection.blocking(
                 stage=Stage.TRANSFORM,
                 layer=Layer.INTEGRIDADE,
                 rule="category_id ausente no snapshot",
-                severity=Severity.BLOQUEANTE,
                 external_type=row.get("external_type"),
                 external_id=row.get("external_id"),
             )
@@ -227,11 +222,10 @@ def attach_enrichment(
 
         if entity is None or not entity.title:
             rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.TRANSFORM,
                     layer=Layer.INTEGRIDADE,
                     rule=MISSING_ENRICHMENT,
-                    severity=Severity.AVISO,
                     external_type=row["external_type"],
                     external_id=row["external_id"],
                     detail="entidade sem titulo apos o enriquecimento",
@@ -270,11 +264,10 @@ def canonicalize_titles(frame: pd.DataFrame) -> tuple[pd.DataFrame, list[Rejecti
     empty_canonical = working["canonical_title"].str.len() == 0
     for _, row in working[empty_canonical].iterrows():
         rejections.append(
-            Rejection(
+            Rejection.warning(
                 stage=Stage.TRANSFORM,
                 layer=Layer.TRANSFORM,
                 rule=EMPTY_CANONICAL_TITLE,
-                severity=Severity.AVISO,
                 external_type=row["external_type"],
                 external_id=row["external_id"],
                 detail=f"titulo original: {row['title']!r}",

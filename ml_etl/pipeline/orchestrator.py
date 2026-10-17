@@ -61,7 +61,7 @@ def _collect_payloads(
         return CollectedData(
             payloads=payloads,
             entities=entities,
-            categories=_categories_from_raw(payloads),
+            categories=enrich.categories_from_raw(payloads),
             offers=replayed_offers,
         )
 
@@ -163,27 +163,6 @@ def _category_names(session, resolved: dict[str, dict[str, Any]]) -> dict[str, s
         if name:
             names[category_id] = name
     return names
-
-
-def _categories_from_raw(payloads: Sequence[extract.RawPayload]) -> dict[str, dict[str, Any]]:
-    categories: dict[str, dict[str, Any]] = {}
-    for payload in payloads:
-        if not payload.endpoint.startswith("/categories/") or not isinstance(payload.payload, dict):
-            continue
-        body = payload.payload
-        category_id = body.get("id")
-        if not category_id:
-            continue
-        path = body.get("path_from_root") or []
-        categories[category_id] = {
-            "category_id": category_id,
-            "name": str(body.get("name") or category_id)[:255],
-            "parent_id": path[-2].get("id") if len(path) > 1 else None,
-            "path_from_root": path,
-            "total_items": body.get("total_items_in_this_category"),
-            "permalink": body.get("permalink"),
-        }
-    return categories
 
 
 def run_pipeline(

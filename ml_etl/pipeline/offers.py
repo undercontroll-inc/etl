@@ -8,7 +8,8 @@ from typing import Any
 from ml_etl.api.http_client import ApiError
 from ml_etl.api.mercado_livre import MercadoLivreApi
 from ml_etl.config import Settings, get_settings
-from ml_etl.domain.rejection import Layer, Rejection, Severity, Stage
+from ml_etl.domain.numbers import as_positive_float
+from ml_etl.domain.rejection import Layer, Rejection, Stage
 from ml_etl.logging_config import get_logger
 from ml_etl.pipeline.extract import STAGE_ENRICH, RawPayload, run_parallel
 
@@ -54,16 +55,6 @@ class OffersResult:
         self.rejections.extend(other.rejections)
 
 
-def _as_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return result if result > 0 else None
-
-
 def percentile(values: Sequence[float], fraction: float) -> float | None:
     if not values:
         return None
@@ -103,7 +94,7 @@ def aggregate_offers(external_type: str, external_id: str, payload: Any) -> Prod
     if not entries:
         return None
 
-    priced = [(entry, price) for entry in entries if (price := _as_float(entry.get("price"))) is not None]
+    priced = [(entry, price) for entry in entries if (price := as_positive_float(entry.get("price"))) is not None]
     prices = [price for _, price in priced]
 
     paging_total = payload.get("paging") or {}
@@ -116,7 +107,7 @@ def aggregate_offers(external_type: str, external_id: str, payload: Any) -> Prod
     discounts: list[float] = []
     originals: list[float] = []
     for entry, price in priced:
-        original = _as_float(entry.get("original_price"))
+        original = as_positive_float(entry.get("original_price"))
         if original is None or original <= price:
             continue
         originals.append(original)
@@ -164,11 +155,10 @@ def collect_offers(
             response = api.get_product_items(external_id)
         except ApiError as exc:
             local.rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.ENRICH,
                     layer=Layer.ESTRUTURAL,
                     rule=MISSING_OFFERS,
-                    severity=Severity.AVISO,
                     external_type=external_type,
                     external_id=external_id,
                     detail=str(exc),
@@ -179,11 +169,10 @@ def collect_offers(
         aggregated = aggregate_offers(external_type, external_id, response.payload)
         if aggregated is None:
             local.rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.ENRICH,
                     layer=Layer.ESTRUTURAL,
                     rule=MISSING_OFFERS,
-                    severity=Severity.AVISO,
                     external_type=external_type,
                     external_id=external_id,
                     detail=f"sem ofertas utilizaveis (HTTP {response.status_code})",

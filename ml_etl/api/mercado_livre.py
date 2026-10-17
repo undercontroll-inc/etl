@@ -50,14 +50,8 @@ class MercadoLivreApi:
             authenticated=True,
         )
 
-    def get_site_categories(self) -> ApiResponse:
-        return self._client.get(f"/sites/{self.site_id}/categories", authenticated=False)
-
     def get_category(self, category_id: str) -> ApiResponse:
         return self._client.get(f"/categories/{category_id}", authenticated=False, allow_not_found=True)
-
-    def get_item(self, item_id: str) -> ApiResponse:
-        return self._client.get(f"/items/{item_id}", authenticated=True, allow_not_found=True)
 
     def get_items_multiget(self, item_ids: Sequence[str]) -> ApiResponse:
         return self._client.get("/items", params={"ids": ",".join(item_ids)}, authenticated=True)
@@ -70,9 +64,6 @@ class MercadoLivreApi:
 
     def get_user_product(self, user_product_id: str) -> ApiResponse:
         return self._client.get(f"/user-products/{user_product_id}", authenticated=True, allow_not_found=True)
-
-    def get_item_prices(self, item_id: str) -> ApiResponse:
-        return self._client.get(f"/items/{item_id}/prices", authenticated=True, allow_not_found=True)
 
     def iter_item_batches(self, item_ids: Sequence[str]) -> Iterator[ApiResponse]:
         batch_size = min(self._settings.etl.enrich_batch_size, MULTIGET_LIMIT)
