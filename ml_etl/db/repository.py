@@ -15,6 +15,7 @@ from ml_etl.db.models import (
     MarketCategory,
     MarketCuratedProduct,
     MarketEntity,
+    MarketPriceMovement,
     MarketPriceObservation,
     MarketPublishedSnapshot,
     MarketRawResponse,
@@ -143,6 +144,22 @@ UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "priority_label",
             "confidence",
             "bucket_key",
+            "updated_at",
+        ),
+    ),
+    MarketPriceMovement: (
+        ("run_id", "domain_id"),
+        (
+            "bucket_key",
+            "previous_bucket_key",
+            "previous_run_id",
+            "consecutive",
+            "paired_count",
+            "current_product_count",
+            "previous_product_count",
+            "current_cohort_median",
+            "previous_cohort_median",
+            "price_index_delta_pct",
             "updated_at",
         ),
     ),
@@ -301,6 +318,34 @@ def fetch_previous_price_medians(session: Session, bucket_key: str) -> dict[tupl
     return {(row[0], row[1]): float(row[2]) for row in session.execute(stmt) if row[2] is not None}
 
 
+def fetch_previous_domain_prices(
+    session: Session, bucket_key: str, domains: Iterable[str]
+) -> dict[str, tuple[str, str, list[MarketPriceObservation]]]:
+    wanted = set(domains)
+    if not wanted:
+        return {}
+    stmt = (
+        select(MarketPriceObservation)
+        .join(MarketPublishedSnapshot, MarketPublishedSnapshot.run_id == MarketPriceObservation.run_id)
+        .where(
+            MarketPriceObservation.bucket_key < bucket_key,
+            MarketPriceObservation.domain_id.in_(wanted),
+            MarketPriceObservation.price_median.is_not(None),
+        )
+        .order_by(
+            MarketPriceObservation.bucket_key.desc(),
+            MarketPublishedSnapshot.published_at.desc(),
+            MarketPublishedSnapshot.snapshot_id.desc(),
+        )
+    )
+    history: dict[str, tuple[str, str, list[MarketPriceObservation]]] = {}
+    for row in session.execute(stmt).scalars():
+        reference = history.setdefault(row.domain_id, (row.bucket_key, row.run_id, []))
+        if (row.bucket_key, row.run_id) == reference[:2]:
+            reference[2].append(row)
+    return history
+
+
 def fetch_cached_categories(session: Session) -> dict[str, MarketCategory]:
     stmt = select(MarketCategory)
     return {row.category_id: row for row in session.execute(stmt).scalars()}
@@ -338,6 +383,7 @@ def table_counts(session: Session) -> dict[str, int]:
         MarketSnapshot,
         MarketTrend,
         MarketPriceObservation,
+        MarketPriceMovement,
         MarketScore,
         MarketCuratedProduct,
         MarketPublishedSnapshot,

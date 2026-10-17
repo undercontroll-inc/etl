@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import datetime
 from typing import Any
 
@@ -12,6 +13,7 @@ from ml_etl.db.models import (
     MarketCategory,
     MarketCuratedProduct,
     MarketEntity,
+    MarketPriceMovement,
     MarketPriceObservation,
     MarketScore,
     MarketSnapshot,
@@ -21,6 +23,7 @@ from ml_etl.domain.canonical import canonicalize
 from ml_etl.logging_config import get_logger
 from ml_etl.pipeline.enrich import EnrichedEntity
 from ml_etl.pipeline.offers import ProductOffers
+from ml_etl.pipeline.price_index import PriceMovement
 from ml_etl.pipeline.transform import normalize_collected_at
 
 logger = get_logger(__name__)
@@ -139,6 +142,14 @@ def load_price_observations(
         for offer in offers.values()
     ]
     return repository.upsert(session, MarketPriceObservation, rows)
+
+
+def load_price_movements(session: Session, movements: Sequence[PriceMovement], run_id: str) -> int:
+    if not movements:
+        return 0
+    return repository.upsert(
+        session, MarketPriceMovement, [{"run_id": run_id, **asdict(movement)} for movement in movements]
+    )
 
 
 def load_snapshots(session: Session, frame: pd.DataFrame, run_id: str, bucket_key: str) -> int:

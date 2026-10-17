@@ -159,55 +159,21 @@ WHERE brand_slug IS NOT NULL
 GROUP BY brand_slug, bucket_key
 """
 
-VW_PRICE_MOVEMENT = """
+VW_PRICE_MOVEMENT = f"""
 CREATE VIEW vw_market_price_movement AS
-WITH domain_bucket AS (
-    SELECT
-        p.domain_id AS domain_id,
-        p.bucket_key AS bucket_key,
-        COUNT(*) AS product_count,
-        SUM(p.valid_price_count) AS valid_price_count,
-        SUM(p.observed_seller_count) AS observed_seller_count,
-        AVG(p.price_median) AS avg_price_median
-    FROM market_price_observation p
-    WHERE p.domain_id IS NOT NULL
-      AND p.price_median IS NOT NULL
-      AND p.run_id = (
-          SELECT s.run_id
-          FROM market_published_snapshot s
-          JOIN market_price_observation x ON x.run_id = s.run_id
-          WHERE x.bucket_key = p.bucket_key
-          ORDER BY s.published_at DESC, s.snapshot_id DESC
-          LIMIT 1
-      )
-    GROUP BY p.domain_id, p.bucket_key
-),
-with_previous AS (
-    SELECT
-        domain_id,
-        bucket_key,
-        product_count,
-        valid_price_count,
-        observed_seller_count,
-        avg_price_median,
-        LAG(avg_price_median) OVER (PARTITION BY domain_id ORDER BY bucket_key) AS previous_price_median,
-        LAG(bucket_key) OVER (PARTITION BY domain_id ORDER BY bucket_key) AS previous_bucket_key
-    FROM domain_bucket
-)
 SELECT
-    domain_id,
-    bucket_key,
-    previous_bucket_key,
-    product_count,
-    valid_price_count,
-    observed_seller_count,
-    ROUND(CAST(avg_price_median AS NUMERIC), 2) AS avg_price_median,
-    ROUND(CAST(previous_price_median AS NUMERIC), 2) AS previous_price_median,
-    CASE
-        WHEN previous_price_median IS NULL OR previous_price_median <= 0 THEN NULL
-        ELSE ROUND(CAST((avg_price_median - previous_price_median) / previous_price_median * 100 AS NUMERIC), 2)
-    END AS price_delta_pct
-FROM with_previous
+    m.domain_id,
+    m.bucket_key,
+    m.previous_bucket_key,
+    m.consecutive,
+    m.paired_count,
+    m.current_product_count,
+    m.previous_product_count,
+    m.current_cohort_median,
+    m.previous_cohort_median,
+    m.price_index_delta_pct
+FROM market_price_movement m
+WHERE m.run_id = {REFERENCE_RUN_SQL}
 """
 
 VIEWS: tuple[tuple[str, str], ...] = (

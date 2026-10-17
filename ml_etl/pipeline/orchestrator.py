@@ -13,7 +13,7 @@ from ml_etl.db.models import PUBLISHABLE_STATUSES
 from ml_etl.domain.buckets import bucket_key_for
 from ml_etl.domain.rejection import RejectionCollector
 from ml_etl.logging_config import get_logger
-from ml_etl.pipeline import enrich, extract, filters, load, publish, quality, raw, score, transform
+from ml_etl.pipeline import enrich, extract, filters, load, price_index, publish, quality, raw, score, transform
 from ml_etl.pipeline import offers as offers_module
 
 logger = get_logger(__name__)
@@ -273,6 +273,13 @@ def run_pipeline(
             collector.extend(score_rejections)
 
             category_names = _category_names(session, collected.categories)
+            current_prices = price_index.points_from_offers(collected.offers, collected.entities)
+            price_history = price_index.history_from_observations(
+                repository.fetch_previous_domain_prices(
+                    session, bucket_key, {point.domain_id for point in current_prices}
+                )
+            )
+            movements = price_index.compute_movements(bucket_key, current_prices, price_history)
             report = quality.evaluate(
                 target_categories, collected.payloads, scored, collector.items, active.quality
             )
@@ -286,6 +293,7 @@ def run_pipeline(
                     "price_observations": load.load_price_observations(
                         session, collected.offers, effective_run_id, bucket_key, observed_at, collected.entities
                     ),
+                    "price_movements": load.load_price_movements(session, movements, effective_run_id),
                     "scores": load.load_scores(session, scored, effective_run_id, bucket_key),
                     "curated": load.load_curated(session, scored, effective_run_id, bucket_key, category_names),
                     "rejections": len(collector),

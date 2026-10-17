@@ -318,6 +318,30 @@ class MarketCuratedProduct(Base, TimestampMixin):
     )
 
 
+class MarketPriceMovement(Base, TimestampMixin):
+    __tablename__ = "market_price_movement"
+
+    id: Mapped[int] = mapped_column(SurrogateKey, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("etl_run.run_id", ondelete="CASCADE"), nullable=False)
+    domain_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
+    previous_bucket_key: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    previous_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    consecutive: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    paired_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    current_product_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    previous_product_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    current_cohort_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    previous_cohort_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_index_delta_pct: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "domain_id", name="uq_price_movement_run_domain"),
+        CheckConstraint("paired_count <= current_product_count", name="ck_price_movement_pairs"),
+        Index("ix_price_movement_bucket", "bucket_key"),
+    )
+
+
 class MarketPublishedSnapshot(Base):
     __tablename__ = "market_published_snapshot"
 
