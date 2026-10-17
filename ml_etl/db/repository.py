@@ -16,6 +16,7 @@ from ml_etl.db.models import (
     MarketCuratedProduct,
     MarketEntity,
     MarketPriceObservation,
+    MarketPublishedSnapshot,
     MarketRawResponse,
     MarketScore,
     MarketSnapshot,
@@ -26,7 +27,6 @@ from ml_etl.logging_config import get_logger
 logger = get_logger(__name__)
 
 CHUNK_SIZE = 500
-REFERENCE_STATUSES = ("SUCCESS", "PARTIAL")
 
 
 class RunNotFoundError(LookupError):
@@ -249,9 +249,13 @@ def fetch_raw_payloads(session: Session, run_id: str, stage: str | None = None) 
 def _previous_reference(session: Session, model: Any, bucket_key: str) -> tuple[str, str] | None:
     stmt = (
         select(model.bucket_key, model.run_id)
-        .join(EtlRun, EtlRun.run_id == model.run_id)
-        .where(model.bucket_key < bucket_key, EtlRun.status.in_(REFERENCE_STATUSES))
-        .order_by(model.bucket_key.desc(), EtlRun.started_at.desc())
+        .join(MarketPublishedSnapshot, MarketPublishedSnapshot.run_id == model.run_id)
+        .where(model.bucket_key < bucket_key)
+        .order_by(
+            model.bucket_key.desc(),
+            MarketPublishedSnapshot.published_at.desc(),
+            MarketPublishedSnapshot.snapshot_id.desc(),
+        )
         .limit(1)
     )
     row = session.execute(stmt).first()
@@ -275,8 +279,8 @@ def count_prior_buckets(session: Session, bucket_key: str) -> dict[tuple[str, st
             MarketSnapshot.external_id,
             func.count(func.distinct(MarketSnapshot.bucket_key)),
         )
-        .join(EtlRun, EtlRun.run_id == MarketSnapshot.run_id)
-        .where(MarketSnapshot.bucket_key < bucket_key, EtlRun.status.in_(REFERENCE_STATUSES))
+        .join(MarketPublishedSnapshot, MarketPublishedSnapshot.run_id == MarketSnapshot.run_id)
+        .where(MarketSnapshot.bucket_key < bucket_key)
         .group_by(MarketSnapshot.external_type, MarketSnapshot.external_id)
     )
     return {(row[0], row[1]): row[2] for row in session.execute(stmt)}
@@ -306,6 +310,20 @@ def get_run(session: Session, run_id: str) -> EtlRun | None:
     return session.get(EtlRun, run_id)
 
 
+def get_published_snapshot(session: Session, run_id: str) -> MarketPublishedSnapshot | None:
+    stmt = select(MarketPublishedSnapshot).where(MarketPublishedSnapshot.run_id == run_id)
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def latest_published_snapshot(session: Session) -> MarketPublishedSnapshot | None:
+    stmt = (
+        select(MarketPublishedSnapshot)
+        .order_by(MarketPublishedSnapshot.published_at.desc(), MarketPublishedSnapshot.snapshot_id.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
+
+
 def recent_runs(session: Session, limit: int = 10) -> list[EtlRun]:
     stmt = select(EtlRun).order_by(EtlRun.started_at.desc()).limit(limit)
     return list(session.execute(stmt).scalars())
@@ -322,6 +340,7 @@ def table_counts(session: Session) -> dict[str, int]:
         MarketPriceObservation,
         MarketScore,
         MarketCuratedProduct,
+        MarketPublishedSnapshot,
         EtlRejection,
     ]
     counts = {}

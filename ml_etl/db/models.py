@@ -27,6 +27,7 @@ SurrogateKey = BigInteger().with_variant(Integer, "sqlite")
 EXTERNAL_TYPES = ("ITEM", "PRODUCT", "USER_PRODUCT")
 SOURCES = ("HIGHLIGHTS_CATEGORY", "HIGHLIGHTS_PRODUCT", "TRENDS")
 RUN_STATUSES = ("RUNNING", "SUCCESS", "PARTIAL", "FAILED")
+PUBLISHABLE_STATUSES = ("SUCCESS", "PARTIAL")
 
 
 def utcnow() -> datetime:
@@ -314,6 +315,25 @@ class MarketCuratedProduct(Base, TimestampMixin):
         Index("ix_curated_domain", "domain_id"),
         Index("ix_curated_brand_slug", "brand_slug"),
         Index("ix_curated_product_key", "product_key"),
+    )
+
+
+class MarketPublishedSnapshot(Base):
+    __tablename__ = "market_published_snapshot"
+
+    snapshot_id: Mapped[int] = mapped_column(SurrogateKey, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("etl_run.run_id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    quality_report: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(f"status IN {PUBLISHABLE_STATUSES}", name="ck_published_snapshot_status"),
+        Index("ix_published_snapshot_published_at", "published_at"),
+        Index("ix_published_snapshot_bucket", "bucket_key"),
     )
 
 

@@ -6,10 +6,11 @@ import sys
 
 from ml_etl.config import ConfigError, get_settings
 from ml_etl.db import drop_schema, get_engine, init_schema, session_scope
-from ml_etl.db.repository import recent_runs, table_counts
+from ml_etl.db.repository import latest_published_snapshot, recent_runs, table_counts
 from ml_etl.db.views import create_views
 from ml_etl.logging_config import get_logger, setup_logging
 from ml_etl.pipeline import run_pipeline
+from ml_etl.pipeline.publish import publish_run
 
 logger = get_logger("main")
 
@@ -38,6 +39,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Reprocessa a partir do RAW sem chamar a API (exige --run-id)",
     )
+
+    publish_parser = subparsers.add_parser("publish", help="Publica um run SUCCESS/PARTIAL para a core-api")
+    publish_parser.add_argument("--run-id", required=True, help="Execução a publicar")
 
     status_parser = subparsers.add_parser("status", help="Mostra execuções recentes e contagens por tabela")
     status_parser.add_argument("--limit", type=int, default=10, help="Quantidade de execuções listadas")
@@ -85,6 +89,8 @@ def command_run(args: argparse.Namespace) -> int:
     print(f"bucket: {result.bucket_key}")
     print(f"status: {result.status}")
     print(json.dumps(result.stats, indent=2, ensure_ascii=False, default=str))
+    if result.published_snapshot_id is not None:
+        print(f"snapshot publicado: {result.published_snapshot_id}")
     if result.error_message:
         print(f"erro: {result.error_message}", file=sys.stderr)
     if result.quality_report:
@@ -92,10 +98,22 @@ def command_run(args: argparse.Namespace) -> int:
     return 0 if result.status in ACCEPTED_STATUSES else 1
 
 
+def command_publish(args: argparse.Namespace) -> int:
+    with session_scope() as session:
+        snapshot = publish_run(session, args.run_id)
+    print(f"snapshot_id: {snapshot.snapshot_id}")
+    print(f"run_id: {snapshot.run_id}")
+    print(f"bucket: {snapshot.bucket_key}")
+    print(f"status: {snapshot.status}")
+    print(f"publicado em: {snapshot.published_at:%Y-%m-%d %H:%M:%S}")
+    return 0
+
+
 def command_status(args: argparse.Namespace) -> int:
     with session_scope() as session:
         runs = recent_runs(session, args.limit)
         counts = table_counts(session)
+        published = latest_published_snapshot(session)
 
     if not runs:
         print("Nenhuma execução registrada.")
@@ -105,6 +123,12 @@ def command_status(args: argparse.Namespace) -> int:
             started = run.started_at.strftime("%Y-%m-%d %H:%M:%S") if run.started_at else "-"
             finished = run.finished_at.strftime("%Y-%m-%d %H:%M:%S") if run.finished_at else "-"
             print(f"{run.run_id:38} {run.bucket_key:12} {run.status:9} {started:20} {finished:20}")
+
+    print()
+    if published is None:
+        print("Nenhum snapshot publicado.")
+    else:
+        print(f"Snapshot publicado: {published.snapshot_id} run_id={published.run_id} bucket={published.bucket_key}")
 
     print()
     print("Contagem por tabela:")
@@ -130,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         "create-views": lambda: command_create_views(),
         "reset-db": lambda: command_reset_db(args),
         "run": lambda: command_run(args),
+        "publish": lambda: command_publish(args),
         "status": lambda: command_status(args),
     }
 

@@ -8,9 +8,21 @@ from ml_etl.logging_config import get_logger
 logger = get_logger(__name__)
 
 RISING_SQL = "(" + ", ".join(f"'{label}'" for label in RISING_TRAJECTORIES) + ")"
-REFERENCE_RUN_SQL = (
-    "(SELECT r.run_id FROM etl_run r WHERE r.status IN ('SUCCESS', 'PARTIAL') ORDER BY r.started_at DESC LIMIT 1)"
-)
+REFERENCE_RUN_SQL = "(SELECT run_id FROM vw_market_published_snapshot)"
+
+VW_PUBLISHED_SNAPSHOT = """
+CREATE VIEW vw_market_published_snapshot AS
+SELECT
+    snapshot_id,
+    run_id,
+    bucket_key,
+    status,
+    quality_report,
+    published_at
+FROM market_published_snapshot
+ORDER BY published_at DESC, snapshot_id DESC
+LIMIT 1
+"""
 
 VW_PRODUCT_CURRENT = f"""
 CREATE VIEW vw_market_product_current AS
@@ -161,12 +173,11 @@ WITH domain_bucket AS (
     WHERE p.domain_id IS NOT NULL
       AND p.price_median IS NOT NULL
       AND p.run_id = (
-          SELECT x.run_id
-          FROM market_price_observation x
-          JOIN etl_run r ON r.run_id = x.run_id
+          SELECT s.run_id
+          FROM market_published_snapshot s
+          JOIN market_price_observation x ON x.run_id = s.run_id
           WHERE x.bucket_key = p.bucket_key
-            AND r.status IN ('SUCCESS', 'PARTIAL')
-          ORDER BY r.started_at DESC
+          ORDER BY s.published_at DESC, s.snapshot_id DESC
           LIMIT 1
       )
     GROUP BY p.domain_id, p.bucket_key
@@ -200,6 +211,7 @@ FROM with_previous
 """
 
 VIEWS: tuple[tuple[str, str], ...] = (
+    ("vw_market_published_snapshot", VW_PUBLISHED_SNAPSHOT),
     ("vw_market_product_current", VW_PRODUCT_CURRENT),
     ("vw_market_rising_products", VW_RISING_PRODUCTS),
     ("vw_market_category_summary", VW_CATEGORY_SUMMARY),

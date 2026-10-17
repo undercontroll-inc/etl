@@ -9,10 +9,11 @@ from typing import Any
 from ml_etl.api.mercado_livre import MercadoLivreApi
 from ml_etl.config import Settings, get_settings
 from ml_etl.db import repository, session_scope
+from ml_etl.db.models import PUBLISHABLE_STATUSES
 from ml_etl.domain.buckets import bucket_key_for
 from ml_etl.domain.rejection import RejectionCollector
 from ml_etl.logging_config import get_logger
-from ml_etl.pipeline import enrich, extract, filters, load, quality, raw, score, transform
+from ml_etl.pipeline import enrich, extract, filters, load, publish, quality, raw, score, transform
 from ml_etl.pipeline import offers as offers_module
 
 logger = get_logger(__name__)
@@ -26,6 +27,7 @@ class PipelineResult:
     stats: dict[str, Any] = field(default_factory=dict)
     error_message: str | None = None
     quality_report: dict[str, Any] | None = None
+    published_snapshot_id: int | None = None
 
 
 def _previous_ranks(session, bucket_key: str) -> dict[tuple[str, str, str], int]:
@@ -303,7 +305,7 @@ def run_pipeline(
             )
 
         logger.info("Pipeline concluido run_id=%s status=%s stats=%s", effective_run_id, status, stats)
-        return PipelineResult(
+        result = PipelineResult(
             run_id=effective_run_id,
             bucket_key=bucket_key,
             status=status,
@@ -326,3 +328,16 @@ def run_pipeline(
             stats=stats,
             error_message=str(exc),
         )
+
+    if active.auto_publish and status in PUBLISHABLE_STATUSES:
+        result.published_snapshot_id = _auto_publish(active, effective_run_id)
+    return result
+
+
+def _auto_publish(settings: Settings, run_id: str) -> int | None:
+    try:
+        with session_scope(settings) as session:
+            return publish.publish_run(session, run_id).snapshot_id
+    except Exception:
+        logger.exception("Publicação automática falhou run_id=%s", run_id)
+        return None
