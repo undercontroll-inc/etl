@@ -459,6 +459,14 @@ especificação: o score existe, mas sinalizado como pouco confiável até haver
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
+Cobertura (mínimo de 80% em `ml_etl`, configurado em `.coveragerc`):
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/coverage run -m unittest discover -s tests -t .
+.venv/bin/coverage report
+```
+
 A suíte usa SQLite em memória e uma API simulada (`tests/fake_api.py`), sem chamadas de
 rede. Cobre a execução ponta a ponta, a idempotência de reexecuções (incluindo
 `market_price_observation`), o reprocessamento a partir do RAW com replay das ofertas, a
