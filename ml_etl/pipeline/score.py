@@ -7,7 +7,7 @@ import pandas as pd
 
 from ml_etl.config import Settings, get_settings
 from ml_etl.domain.canonical import canonical_tokens
-from ml_etl.domain.rejection import INSUFFICIENT_HISTORY, Layer, Rejection, Severity, Stage
+from ml_etl.domain.rejection import INSUFFICIENT_HISTORY, Layer, Rejection, Stage
 from ml_etl.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -145,11 +145,10 @@ def score_highlights(
 
         if outcome.confidence == "LOW":
             rejections.append(
-                Rejection(
+                Rejection.warning(
                     stage=Stage.SCORE,
                     layer=Layer.QUALIDADE_TEMPORAL,
                     rule=INSUFFICIENT_HISTORY,
-                    severity=Severity.AVISO,
                     external_type=row["external_type"],
                     external_id=row["external_id"],
                     detail=f"buckets anteriores disponiveis: {prior}",

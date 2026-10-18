@@ -166,10 +166,15 @@ python main.py status
 | `run --skip-api --run-id <uuid>` | Reprocessa a partir do RAW, sem chamar a API |
 | `run --categories MLB5726,MLB432825` | Sobrescreve as categorias-alvo |
 | `run --bucket day` | Sobrescreve a granularidade do snapshot |
-| `status` | Mostra as últimas execuções e a contagem por tabela |
+| `publish --run-id <uuid>` | Publica um run `SUCCESS`/`PARTIAL` para a core-api |
+| `status` | Mostra as últimas execuções, o snapshot publicado e a contagem por tabela |
+
+`init-db` cria tabelas novas, aplica os patches pendentes registrados em `schema_patch` e
+recria as views. O `run` publica automaticamente runs `SUCCESS`/`PARTIAL`
+(`ETL_AUTO_PUBLISH=true`); o código de saída é `0` para esses status e `1` para `FAILED`.
 
 O `create-views` é útil depois de alterar [views.py](ml_etl/db/views.py): ele derruba e
-recria as cinco views sem exigir recarga de dados.
+recria as views sem exigir recarga de dados.
 
 ### Alternando o banco
 
@@ -192,10 +197,10 @@ Cada etapa recebe e entrega um artefato explícito, e toda linha descartada vira
 
 ```mermaid
 flowchart TD
-    Start["main.py run"] --> Run["cria etl_run com run_id e bucket_key"]
+    Start["main.py run"] --> Run["confirma etl_run RUNNING em transacao propria"]
 
     Run --> Ex["EXTRACT: trends, highlights e categorias"]
-    Ex --> RawSave["RAW: grava payload com hash sha256 em market_raw_response"]
+    Ex --> RawSave["RAW: cada etapa grava seus payloads em transacao propria"]
 
     RawSave --> Keys["deriva as chaves (external_type, external_id) validas dos highlights"]
     Keys --> En["ENRICH: titulo, domain_id, marca, modelo e atributos tecnicos"]
@@ -215,9 +220,21 @@ flowchart TD
     Filt -->|fora do dominio| RejBiz["etl_rejection REJEICAO_NEGOCIO"]
     Filt -->|dentro| Sc["SCORE: 5 componentes ponderados"]
 
-    Sc --> Curated["LOAD: market_curated_product e market_score"]
-    Curated --> Finish["finaliza etl_run com status e stats"]
+    Sc --> Curated["LOAD: market_curated_product, market_score e market_price_movement"]
+    Curated --> Gate{"quality gate"}
+    Gate -->|PASS| Ok["etl_run SUCCESS"]
+    Gate -->|WARN| Partial["etl_run PARTIAL"]
+    Gate -->|FAIL| Failed["etl_run FAILED"]
+    Ok --> Pub["publica em market_published_snapshot"]
+    Partial --> Pub
 ```
+
+TRANSFORM, FILTER, SCORE e LOAD rodam em uma única transação. Uma exceção desfaz só essa
+transação: o `etl_run` termina `FAILED` com a mensagem de erro e o RAW das etapas concluídas
+continua disponível para replay. O quality gate (`ml_etl/pipeline/quality.py`) mede cobertura
+de categorias-alvo com highlights, quantidade de produtos curados e cobertura de preço; os
+limites vêm de `ETL_QUALITY_*`. A publicação roda em uma transação curta depois da carga.
+O contrato completo com a core-api está em [docs/core-api-contract.md](docs/core-api-contract.md).
 
 O `market_snapshot` guarda **todos** os registros estruturalmente válidos, mesmo os que o
 FILTER descarta. Só o `market_curated_product` é restrito ao domínio de negócio. Isso
@@ -227,16 +244,22 @@ permite revisar a whitelist depois e reprocessar sem perder histórico.
 
 ```mermaid
 flowchart LR
-    Cmd["run --skip-api --run-id uuid"] --> Fetch["le market_raw_response do run"]
+    Cmd["run --skip-api --run-id uuid"] --> New["cria novo etl_run com params.replay_of"]
+    New --> Fetch["le market_raw_response da coleta original"]
     Fetch --> Rebuild["reconstroi as entidades pelo endpoint de origem"]
-    Rebuild --> Reuse["TRANSFORM, FILTER, SCORE e LOAD normais"]
-    Reuse --> Same["mesmo bucket_key do run original, upsert nas mesmas linhas"]
+    Rebuild --> Reuse["TRANSFORM, FILTER, SCORE, LOAD e quality gate normais"]
+    Reuse --> Same["mesmo bucket_key e collected_at do RAW, linhas do novo run"]
 ```
+
+O replay nunca altera o run original e registra apenas as próprias rejeições. Replay de um
+replay reutiliza o RAW da coleta original. Um run `FAILED` pode ser reprocessado assim sem
+nova chamada à API.
 
 O endpoint gravado em cada payload é o que determina o `external_type` na reconstrução:
 `/items` em lote, `/products/` e `/user-products/`. Os payloads de
-`/products/:productId/items` são reconhecidos separadamente e reagregados, de modo que preço
-e concorrência são reproduzidos no replay sem nova chamada à API.
+`/products/:productId/items` (uma linha de RAW por página) são reconhecidos separadamente e
+reagregados, de modo que preço e amostra de ofertas são reproduzidos no replay sem nova
+chamada à API.
 
 ## Classificação nas APIs
 
@@ -357,23 +380,31 @@ flowchart LR
 Se o resultado ficar vazio, a linha é rejeitada com severidade de aviso e o payload
 original permanece no RAW.
 
-## Idempotência
+## Idempotência e snapshots imutáveis
 
-Toda carga usa `INSERT ... ON CONFLICT DO UPDATE`, com a chave lógica ancorada em
-`bucket_key` — derivado de `collected_at` conforme `ETL_SNAPSHOT_BUCKET`:
+O `bucket_key` é derivado de `collected_at` conforme `ETL_SNAPSHOT_BUCKET`:
 
 - `month` (default) → `2026-08`
 - `day` → `2026-08-29`
 
-Rodar o pipeline várias vezes dentro do mesmo bucket atualiza as mesmas linhas em vez de
-duplicá-las. As chaves únicas são:
+As tabelas de mercado são imutáveis por execução: cada run grava suas próprias linhas e as
+chaves únicas incluem `run_id`. Reexecutar o mesmo bucket gera um novo conjunto completo em
+vez de misturar produtos de coletas diferentes; produtos que saíram do ranking somem da view
+assim que o novo run é publicado. As chaves únicas são:
 
-- `market_entity` → `(external_type, external_id)`
-- `market_snapshot` → `(source, external_type, external_id, category_id, bucket_key)`
-- `market_trend` → `(category_id, keyword, bucket_key)`
-- `market_score` → `(external_type, external_id, bucket_key)`
-- `market_curated_product` → `(source, external_type, external_id, bucket_key)`
+- `market_entity` → `(external_type, external_id)` (dimensão mutável, upsert)
+- `market_category` → `category_id` (dimensão mutável, upsert)
+- `market_snapshot` → `(run_id, source, external_type, external_id, category_id)`
+- `market_trend` → `(run_id, category_id, keyword)`
+- `market_score` → `(run_id, external_type, external_id)`
+- `market_price_observation` → `(run_id, external_type, external_id)`
+- `market_curated_product` → `(run_id, source, external_type, external_id)`
+- `market_price_movement` → `(run_id, domain_id)`
 - `market_raw_response` → `(run_id, payload_hash)`
+- `market_published_snapshot` → `run_id`
+
+Comparações históricas (`rank_delta`, `price_delta_pct`, confiança e índice de preço) usam
+somente runs publicados de buckets anteriores.
 
 ## Agendamento mensal
 
@@ -381,7 +412,7 @@ duplicá-las. As chaves únicas são:
 python scheduler.py
 ```
 
-Lê `ETL_SCHEDULE_CRON` (default `0 3 1 * *`: 03:00 do dia 1 de cada mês). Alternativa via
+Lê `ETL_SCHEDULE_CRON` (default `0 3 1 * *`: 03:00 do dia 1 de cada mês), sempre em UTC. Alternativa via
 crontab do sistema:
 
 ```cron
@@ -459,6 +490,14 @@ especificação: o score existe, mas sinalizado como pouco confiável até haver
 .venv/bin/python -m unittest discover -s tests -t .
 ```
 
+Cobertura (mínimo de 80% em `ml_etl`, configurado em `.coveragerc`):
+
+```bash
+.venv/bin/pip install -r requirements-dev.txt
+.venv/bin/coverage run -m unittest discover -s tests -t .
+.venv/bin/coverage report
+```
+
 A suíte usa SQLite em memória e uma API simulada (`tests/fake_api.py`), sem chamadas de
 rede. Cobre a execução ponta a ponta, a idempotência de reexecuções (incluindo
 `market_price_observation`), o reprocessamento a partir do RAW com replay das ofertas, a
@@ -482,12 +521,14 @@ ml_etl/
 ├── logging_config.py
 ├── auth/                token client_credentials com cache
 ├── api/                 cliente HTTP (backoff + jitter) e endpoints do Mercado Livre
-├── db/                  engine, models, views de consumo e upsert dialect-aware
+├── db/                  engine, models, migrations (schema_patch), views e upsert dialect-aware
 ├── domain/              buckets, canonicalização, atributos, whitelist e rejeições
-└── pipeline/            extract, raw, enrich, offers, transform, filters, score, load, orchestrator
+└── pipeline/            extract, raw, enrich, offers, transform, filters, score, quality,
+                         price_index, load, publish, orchestrator
 
 docs/
-└── ai-insights-prompt.md   prompt, dicionário de dados e guardrails para a AI
+├── ai-insights-prompt.md   prompt, dicionário de dados e guardrails para a AI
+└── core-api-contract.md    contrato de tabelas e views lido pela core-api
 ```
 
 ## Modelo de dados
@@ -501,6 +542,8 @@ erDiagram
     etl_run ||--o{ market_price_observation : "produz"
     etl_run ||--o{ market_score : "produz"
     etl_run ||--o{ market_curated_product : "produz"
+    etl_run ||--o{ market_price_movement : "produz"
+    etl_run ||--o| market_published_snapshot : "publicado como"
 
     market_entity ||--o{ market_snapshot : "e observada em"
     market_entity ||--o{ market_price_observation : "tem preco em"
@@ -516,18 +559,25 @@ erDiagram
 
 As camadas se dividem assim:
 
-- **Auditoria** — `etl_run`, `market_raw_response`, `etl_rejection`
+- **Auditoria** — `etl_run`, `market_raw_response`, `etl_rejection`, `schema_patch`
 - **Referência** — `market_category`, `market_entity`
 - **Série temporal** — `market_snapshot`, `market_trend`, `market_price_observation`
-- **Analítica** — `market_score`, `market_curated_product`
+- **Analítica** — `market_score`, `market_curated_product`, `market_price_movement`
+- **Publicação** — `market_published_snapshot`
 
 ### `market_price_observation`
 
-Uma linha por produto por bucket, única em `(external_type, external_id, bucket_key)`. Guarda
-a distribuição de preço (`price_min`, `price_p25`, `price_median`, `price_p75`, `price_max`),
-a concorrência (`offer_count`, `seller_count`, `official_store_count`), o desconto
-(`original_price_median`, `discount_pct_median`) e quem lidera o card (`winner_item_id`,
-`winner_price`).
+Uma linha por produto por run, única em `(run_id, external_type, external_id)`. Guarda a
+distribuição de preço (`price_min`, `price_p25`, `price_median`, `price_p75`, `price_max`), a
+amostra (`available_offer_count`, `observed_offer_count`, `valid_price_count`,
+`sample_complete`, `observed_seller_count`, `official_store_count`), o desconto
+(`original_price_median`, `discount_pct_median`), o menor preço observado
+(`lowest_price_item_id`, `lowest_price`) e os metadados do momento da coleta (`currency_id`,
+`category_id`, `domain_id`).
+
+`/products/:id/items` é paginado até `paging.total` ou até `ETL_OFFERS_MAX_PAGES` páginas
+(default 3). `available_offer_count` é o total informado pela API; a mediana usa apenas os
+`valid_price_count` preços observados, e `sample_complete` diz se a amostra cobriu tudo.
 
 É a tabela que constrói a série histórica de preço. Como a granularidade padrão é mensal,
 uma comparação mês contra mês exige dois ciclos de coleta: no primeiro mês `price_delta_pct`
@@ -540,18 +590,22 @@ backend responda a perguntas de agrupamento sem join. Além dos campos de rankin
 carrega taxonomia (`domain_id`, `category_id`, `category_name`), identidade
 (`brand`, `brand_slug`, `model`, `product_key`), atributos técnicos (`voltage`,
 `power_watts`, `capacity_value`, `capacity_unit`, `energy_efficiency`), preço e concorrência
-(`price_min`, `price_median`, `price_max`, `price_delta_pct`, `discount_pct`, `offer_count`,
-`seller_count`) e a rastreabilidade da classificação (`relevance`, `domain_reason`).
+(`price_min`, `price_median`, `price_max`, `price_delta_pct`, `discount_pct`) com a amostra
+de ofertas (`available_offer_count`, `observed_offer_count`, `valid_price_count`,
+`sample_complete`, `observed_seller_count`) e a rastreabilidade da classificação
+(`relevance`, `domain_reason`).
 
-Sobre ela existem cinco views, criadas pelo `init-db` e recriáveis com `create-views`:
+Sobre ela existem seis views, criadas pelo `init-db` e recriáveis com `create-views`. Todas
+leem somente o run de `vw_market_published_snapshot`:
 
 | View | Grão | Para que serve |
 |---|---|---|
-| `vw_market_product_current` | um produto | foto achatada do bucket mais recente |
+| `vw_market_published_snapshot` | uma linha | último snapshot publicado (`market_snapshot_ready`) |
+| `vw_market_product_current` | um produto | foto achatada do snapshot publicado |
 | `vw_market_rising_products` | um produto | a tabela de produtos em alta, já filtrada |
 | `vw_market_category_summary` | `domain_id` + bucket | agrupamento por tipo de aparelho |
 | `vw_market_brand_summary` | `brand_slug` + bucket | agrupamento por marca |
-| `vw_market_price_movement` | `domain_id` + bucket | variação de preço mês a mês |
+| `vw_market_price_movement` | `domain_id` | índice de preço por coorte pareada |
 
 ```mermaid
 flowchart LR
@@ -563,12 +617,15 @@ flowchart LR
         V5["vw_market_price_movement"]
     end
 
+    Published[("market_published_snapshot")] --> V1
+    Published --> V3
+    Published --> V4
+    Published --> V5
     Curated[("market_curated_product")] --> V1
     Curated --> V3
     Curated --> V4
     V1 --> V2
-    Price[("market_price_observation")] --> V5
-    Entity[("market_entity")] --> V5
+    Movement[("market_price_movement")] --> V5
 
     views --> Java["Backend Java"]
     Java -->|"cruza por product_key, brand_slug e domain_id"| Repairs[("Catalogo de consertos")]

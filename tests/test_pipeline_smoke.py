@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import os
 import unittest
 from datetime import datetime, timezone
-from unittest import mock
 
-from sqlalchemy import select, text, update
+from sqlalchemy import func, select, text, update
 
-from ml_etl import config as config_module
-from ml_etl.db import engine as engine_module
 from ml_etl.db import session_scope
 from ml_etl.db.models import EtlRejection, MarketCuratedProduct, MarketPriceObservation, MarketSnapshot
 from ml_etl.db.repository import table_counts
@@ -17,49 +13,19 @@ from ml_etl.domain.attributes import build_product_key, extract_attributes, pars
 from ml_etl.domain.buckets import bucket_key_for, previous_bucket_key, rank_band, trajectory_label
 from ml_etl.domain.canonical import canonicalize
 from ml_etl.domain.whitelist import classify_small_appliance
-from ml_etl.pipeline import orchestrator, run_pipeline
 from ml_etl.pipeline.offers import aggregate_offers, percentile
-from tests.fake_api import FakeMercadoLivreApi
-
-TARGET_CATEGORIES = ["MLB5726", "MLB432825"]
+from tests.support import PipelineTestCase
 
 
-class PipelineSmokeTest(unittest.TestCase):
-    def setUp(self) -> None:
-        self._env = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(
-            {
-                "DB_BACKEND": "memory",
-                "ML_CLIENT_ID": "fake-client-id",
-                "ML_CLIENT_SECRET": "fake-client-secret",
-                "ETL_TARGET_CATEGORIES": ",".join(TARGET_CATEGORIES),
-                "ETL_SNAPSHOT_BUCKET": "month",
-                "ETL_MAX_WORKERS": "2",
-                "ETL_LOG_LEVEL": "CRITICAL",
-            }
-        )
-        config_module.reset_settings_cache()
-        engine_module.dispose_engine()
-        self.settings = config_module.load_settings(use_dotenv=False)
-        self.assertTrue(self.settings.database.is_memory, "a suite deve rodar apenas em memoria")
-
-    def tearDown(self) -> None:
-        engine_module.dispose_engine()
-        config_module.reset_settings_cache()
-        os.environ.clear()
-        os.environ.update(self._env)
-
-    def _run(self, **kwargs):
-        with mock.patch.object(orchestrator, "MercadoLivreApi", FakeMercadoLivreApi):
-            return run_pipeline(settings=self.settings, **kwargs)
+class PipelineSmokeTest(PipelineTestCase):
+    @staticmethod
+    def _curated_scores(session, run_id: str) -> dict[str, float]:
+        rows = session.execute(select(MarketCuratedProduct).where(MarketCuratedProduct.run_id == run_id)).scalars()
+        return {f"{row.external_type}:{row.external_id}": float(row.score) for row in rows}
 
     @staticmethod
-    def _curated_scores(session, bucket_key: str) -> dict[str, float]:
-        rows = session.execute(
-            select(MarketCuratedProduct).where(MarketCuratedProduct.bucket_key == bucket_key)
-        ).scalars()
-        return {f"{row.external_type}:{row.external_id}": float(row.score) for row in rows}
+    def _rows_per_run(session, model, run_id: str) -> int:
+        return session.execute(select(func.count()).select_from(model).where(model.run_id == run_id)).scalar()
 
     def test_pipeline_runs_end_to_end(self) -> None:
         result = self._run()
@@ -88,7 +54,7 @@ class PipelineSmokeTest(unittest.TestCase):
 
         with session_scope(self.settings) as session:
             baseline = table_counts(session)
-            baseline_scores = self._curated_scores(session, first.bucket_key)
+            baseline_scores = self._curated_scores(session, first.run_id)
 
         second = self._run()
         third = self._run()
@@ -97,21 +63,20 @@ class PipelineSmokeTest(unittest.TestCase):
 
         with session_scope(self.settings) as session:
             after = table_counts(session)
-            after_scores = self._curated_scores(session, first.bucket_key)
+            for run in (second, third):
+                self.assertEqual(baseline_scores, self._curated_scores(session, run.run_id))
+                for model in (MarketSnapshot, MarketPriceObservation, MarketCuratedProduct):
+                    self.assertEqual(
+                        self._rows_per_run(session, model, first.run_id),
+                        self._rows_per_run(session, model, run.run_id),
+                        f"{model.__tablename__} mudou entre execucoes do mesmo bucket",
+                    )
+            current = session.execute(text("SELECT external_id FROM vw_market_product_current")).scalars().all()
 
-        self.assertEqual(baseline_scores, after_scores, "os scores mudaram entre reexecucoes do mesmo bucket")
-
-        for table in (
-            "market_entity",
-            "market_snapshot",
-            "market_trend",
-            "market_price_observation",
-            "market_score",
-            "market_curated_product",
-            "market_category",
-        ):
+        for table in ("market_entity", "market_category"):
             self.assertEqual(baseline[table], after[table], f"tabela {table} duplicou linhas")
-
+        self.assertEqual(3 * baseline["market_snapshot"], after["market_snapshot"], "cada execucao e imutavel")
+        self.assertEqual(len(baseline_scores), len(current), "a view atual expoe apenas uma execucao")
         self.assertEqual(3, after["etl_run"])
 
     def test_invalid_domain_rows_are_rejected(self) -> None:
@@ -154,14 +119,20 @@ class PipelineSmokeTest(unittest.TestCase):
 
         replay = self._run(run_id=first.run_id, skip_api=True)
         self.assertEqual("SUCCESS", replay.status, replay.error_message)
-        self.assertEqual(first.run_id, replay.run_id)
+        self.assertNotEqual(first.run_id, replay.run_id)
+        self.assertEqual(first.run_id, replay.stats["replay_of"])
         self.assertEqual(first.stats["curated"], replay.stats["curated"])
 
         with session_scope(self.settings) as session:
-            after = table_counts(session)
+            replayed_curated = self._rows_per_run(session, MarketCuratedProduct, replay.run_id)
+            replayed_snapshots = self._rows_per_run(session, MarketSnapshot, replay.run_id)
+            original_scores = self._curated_scores(session, first.run_id)
+            replayed_scores = self._curated_scores(session, replay.run_id)
 
-        self.assertEqual(baseline["market_curated_product"], after["market_curated_product"])
-        self.assertEqual(baseline["market_snapshot"], after["market_snapshot"])
+        self.assertTrue(original_scores)
+        self.assertEqual(original_scores, replayed_scores)
+        self.assertEqual(baseline["market_curated_product"], replayed_curated)
+        self.assertEqual(baseline["market_snapshot"], replayed_snapshots)
 
     def test_skip_api_requires_run_id(self) -> None:
         with self.assertRaises(ValueError):
@@ -188,16 +159,23 @@ class PipelineSmokeTest(unittest.TestCase):
         self.assertEqual(1400, microwave.power_watts)
         self.assertEqual("220V", microwave.voltage)
         self.assertEqual("L", microwave.capacity_unit)
-        self.assertEqual(18, microwave.offer_count)
+        self.assertEqual(18, microwave.available_offer_count)
+        self.assertEqual(3, microwave.observed_offer_count)
+        self.assertEqual(3, microwave.valid_price_count)
+        self.assertFalse(microwave.sample_complete)
+        self.assertEqual(3, microwave.observed_seller_count)
         self.assertIsNotNone(microwave.price_median)
         self.assertIsNotNone(microwave.relevance)
         self.assertEqual("DOMINIO_WHITELIST", microwave.domain_reason)
 
         self.assertEqual(526.16, float(observation.price_min))
         self.assertEqual(641.90, float(observation.price_max))
-        self.assertEqual("MLB3003724516", observation.winner_item_id)
+        self.assertEqual("MLB3003724516", observation.lowest_price_item_id)
+        self.assertEqual(526.16, float(observation.lowest_price))
         self.assertEqual("MLB73057", observation.category_id)
-        self.assertEqual(3, observation.seller_count)
+        self.assertEqual(3, observation.observed_seller_count)
+        self.assertEqual(18, observation.available_offer_count)
+        self.assertFalse(observation.sample_complete)
 
     def test_blacklisted_domain_is_rejected_even_with_valid_rank(self) -> None:
         result = self._run()
@@ -235,7 +213,7 @@ class PipelineSmokeTest(unittest.TestCase):
             microwave = session.execute(
                 select(MarketCuratedProduct).where(
                     MarketCuratedProduct.external_id == "MLB19617678",
-                    MarketCuratedProduct.bucket_key == second.bucket_key,
+                    MarketCuratedProduct.run_id == second.run_id,
                 )
             ).scalar_one()
 
@@ -270,9 +248,9 @@ class PipelineSmokeTest(unittest.TestCase):
         self.assertEqual(first.stats["price_observations"], replay.stats["price_observations"])
 
         with session_scope(self.settings) as session:
-            after = table_counts(session)["market_price_observation"]
+            replayed = self._rows_per_run(session, MarketPriceObservation, replay.run_id)
 
-        self.assertEqual(baseline, after)
+        self.assertEqual(baseline, replayed)
 
     def test_trajectory_and_confidence_use_previous_bucket(self) -> None:
         first = self._run()
@@ -291,7 +269,7 @@ class PipelineSmokeTest(unittest.TestCase):
 
         with session_scope(self.settings) as session:
             curated = session.execute(
-                select(MarketCuratedProduct).where(MarketCuratedProduct.bucket_key == second.bucket_key)
+                select(MarketCuratedProduct).where(MarketCuratedProduct.run_id == second.run_id)
             ).scalars().all()
 
         self.assertTrue(curated)
@@ -314,19 +292,29 @@ class OfferAggregationTest(unittest.TestCase):
     def test_aggregates_prices_and_competition(self) -> None:
         offers = aggregate_offers("PRODUCT", "MLB1", self.PAYLOAD)
 
-        self.assertEqual(18, offers.offer_count, "offer_count deve vir de paging.total")
-        self.assertEqual(2, offers.seller_count, "vendedores repetidos contam uma vez")
+        self.assertEqual(18, offers.available_offer_count, "o total disponivel vem de paging.total")
+        self.assertEqual(3, offers.observed_offer_count)
+        self.assertEqual(3, offers.valid_price_count)
+        self.assertFalse(offers.sample_complete)
+        self.assertEqual(2, offers.observed_seller_count, "vendedores repetidos contam uma vez")
         self.assertEqual(100.0, offers.price_min)
         self.assertEqual(200.0, offers.price_median)
         self.assertEqual(300.0, offers.price_max)
-        self.assertEqual("A", offers.winner_item_id)
-        self.assertEqual(100.0, offers.winner_price)
+        self.assertEqual("A", offers.lowest_price_item_id)
+        self.assertEqual(100.0, offers.lowest_price)
         self.assertEqual(50.0, offers.discount_pct_median)
         self.assertEqual("MLB73057", offers.category_id, "deve escolher a categoria mais frequente")
 
-    def test_offer_count_falls_back_to_result_length(self) -> None:
+    def test_unknown_total_is_not_assumed_complete(self) -> None:
         offers = aggregate_offers("PRODUCT", "MLB1", {"results": self.PAYLOAD["results"]})
-        self.assertEqual(3, offers.offer_count)
+        self.assertIsNone(offers.available_offer_count)
+        self.assertEqual(3, offers.observed_offer_count)
+        self.assertFalse(offers.sample_complete)
+
+    def test_sample_is_complete_when_every_offer_was_observed(self) -> None:
+        offers = aggregate_offers("PRODUCT", "MLB1", {**self.PAYLOAD, "paging": {"total": 3}})
+        self.assertEqual(3, offers.available_offer_count)
+        self.assertTrue(offers.sample_complete)
 
     def test_ignores_non_positive_and_missing_prices(self) -> None:
         offers = aggregate_offers(
@@ -334,6 +322,8 @@ class OfferAggregationTest(unittest.TestCase):
             "MLB1",
             {"results": [{"item_id": "A", "price": 0}, {"item_id": "B", "price": None}, {"item_id": "C", "price": 50}]},
         )
+        self.assertEqual(3, offers.observed_offer_count)
+        self.assertEqual(1, offers.valid_price_count, "a mediana depende apenas dos precos validos")
         self.assertEqual(50.0, offers.price_min)
         self.assertEqual(50.0, offers.price_max)
 

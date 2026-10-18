@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger,
+    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -13,6 +14,8 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
+    text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -23,7 +26,8 @@ SurrogateKey = BigInteger().with_variant(Integer, "sqlite")
 
 EXTERNAL_TYPES = ("ITEM", "PRODUCT", "USER_PRODUCT")
 SOURCES = ("HIGHLIGHTS_CATEGORY", "HIGHLIGHTS_PRODUCT", "TRENDS")
-RUN_STATUSES = ("RUNNING", "SUCCESS", "FAILED")
+RUN_STATUSES = ("RUNNING", "SUCCESS", "PARTIAL", "FAILED")
+PUBLISHABLE_STATUSES = ("SUCCESS", "PARTIAL")
 
 
 def utcnow() -> datetime:
@@ -41,6 +45,13 @@ class TimestampMixin:
     )
 
 
+class SchemaPatch(Base):
+    __tablename__ = "schema_patch"
+
+    name: Mapped[str] = mapped_column(String(120), primary_key=True)
+    applied_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
 class EtlRun(Base):
     __tablename__ = "etl_run"
 
@@ -51,6 +62,7 @@ class EtlRun(Base):
     bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
     params: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     stats: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    quality_report: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     __table_args__ = (
@@ -148,8 +160,9 @@ class MarketSnapshot(Base, TimestampMixin):
 
     __table_args__ = (
         UniqueConstraint(
-            "source", "external_type", "external_id", "category_id", "bucket_key", name="uq_snapshot_logical"
+            "run_id", "source", "external_type", "external_id", "category_id", name="uq_snapshot_run"
         ),
+        Index("ix_snapshot_run", "run_id"),
         CheckConstraint("rank BETWEEN 1 AND 20", name="ck_snapshot_rank_range"),
         CheckConstraint(f"external_type IN {EXTERNAL_TYPES}", name="ck_snapshot_external_type"),
         Index("ix_snapshot_bucket", "bucket_key"),
@@ -165,8 +178,17 @@ class MarketPriceObservation(Base, TimestampMixin):
     external_type: Mapped[str] = mapped_column(String(20), nullable=False)
     external_id: Mapped[str] = mapped_column(String(32), nullable=False)
     bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
-    offer_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    seller_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    available_offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_offer_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    valid_price_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
+    sample_complete: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    observed_seller_count: Mapped[int] = mapped_column(
+        Integer, default=0, server_default=text("0"), nullable=False
+    )
     official_store_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     price_min: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     price_p25: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
@@ -175,15 +197,18 @@ class MarketPriceObservation(Base, TimestampMixin):
     price_max: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     original_price_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     discount_pct_median: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
-    winner_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    winner_price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    lowest_price_item_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    lowest_price: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     currency_id: Mapped[str | None] = mapped_column(String(10), nullable=True)
     category_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    domain_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("external_type", "external_id", "bucket_key", name="uq_price_observation_logical"),
-        CheckConstraint("offer_count >= 0", name="ck_price_offer_count"),
+        UniqueConstraint("run_id", "external_type", "external_id", name="uq_price_observation_run"),
+        Index("ix_price_run", "run_id"),
+        Index("ix_price_domain", "domain_id"),
+        CheckConstraint("valid_price_count <= observed_offer_count", name="ck_price_sample_counts"),
         Index("ix_price_bucket", "bucket_key"),
         Index("ix_price_entity", "external_type", "external_id"),
     )
@@ -203,7 +228,8 @@ class MarketTrend(Base, TimestampMixin):
     bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("category_id", "keyword", "bucket_key", name="uq_trend_logical"),
+        UniqueConstraint("run_id", "category_id", "keyword", name="uq_trend_run"),
+        Index("ix_trend_run", "run_id"),
         Index("ix_trend_bucket", "bucket_key"),
         Index("ix_trend_canonical", "canonical_keyword"),
     )
@@ -224,7 +250,8 @@ class MarketScore(Base, TimestampMixin):
     computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint("external_type", "external_id", "bucket_key", name="uq_score_logical"),
+        UniqueConstraint("run_id", "external_type", "external_id", name="uq_score_run"),
+        Index("ix_score_run", "run_id"),
         CheckConstraint("score >= 0 AND score <= 100", name="ck_score_range"),
         Index("ix_score_bucket", "bucket_key"),
     )
@@ -263,8 +290,11 @@ class MarketCuratedProduct(Base, TimestampMixin):
     price_max: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
     price_delta_pct: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
     discount_pct: Mapped[float | None] = mapped_column(Numeric(6, 2), nullable=True)
-    offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    seller_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    available_offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    observed_offer_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    valid_price_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sample_complete: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    observed_seller_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     relevance: Mapped[float | None] = mapped_column(Numeric(5, 4), nullable=True)
     domain_reason: Mapped[str | None] = mapped_column(String(40), nullable=True)
     permalink: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -276,7 +306,8 @@ class MarketCuratedProduct(Base, TimestampMixin):
     )
 
     __table_args__ = (
-        UniqueConstraint("source", "external_type", "external_id", "bucket_key", name="uq_curated_logical"),
+        UniqueConstraint("run_id", "source", "external_type", "external_id", name="uq_curated_run"),
+        Index("ix_curated_run", "run_id"),
         CheckConstraint("rank BETWEEN 1 AND 20", name="ck_curated_rank_range"),
         CheckConstraint("score >= 0 AND score <= 100", name="ck_curated_score_range"),
         Index("ix_curated_bucket_score", "bucket_key", "score"),
@@ -284,6 +315,49 @@ class MarketCuratedProduct(Base, TimestampMixin):
         Index("ix_curated_domain", "domain_id"),
         Index("ix_curated_brand_slug", "brand_slug"),
         Index("ix_curated_product_key", "product_key"),
+    )
+
+
+class MarketPriceMovement(Base, TimestampMixin):
+    __tablename__ = "market_price_movement"
+
+    id: Mapped[int] = mapped_column(SurrogateKey, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(String(36), ForeignKey("etl_run.run_id", ondelete="CASCADE"), nullable=False)
+    domain_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
+    previous_bucket_key: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    previous_run_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    consecutive: Mapped[bool] = mapped_column(Boolean, default=False, server_default=false(), nullable=False)
+    paired_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    current_product_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    previous_product_count: Mapped[int] = mapped_column(Integer, default=0, server_default=text("0"), nullable=False)
+    current_cohort_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    previous_cohort_median: Mapped[float | None] = mapped_column(Numeric(14, 2), nullable=True)
+    price_index_delta_pct: Mapped[float | None] = mapped_column(Numeric(8, 2), nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("run_id", "domain_id", name="uq_price_movement_run_domain"),
+        CheckConstraint("paired_count <= current_product_count", name="ck_price_movement_pairs"),
+        Index("ix_price_movement_bucket", "bucket_key"),
+    )
+
+
+class MarketPublishedSnapshot(Base):
+    __tablename__ = "market_published_snapshot"
+
+    snapshot_id: Mapped[int] = mapped_column(SurrogateKey, primary_key=True, autoincrement=True)
+    run_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("etl_run.run_id", ondelete="RESTRICT"), nullable=False, unique=True
+    )
+    bucket_key: Mapped[str] = mapped_column(String(10), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    quality_report: Mapped[dict | None] = mapped_column(JSONType, nullable=True)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+    __table_args__ = (
+        CheckConstraint(f"status IN {PUBLISHABLE_STATUSES}", name="ck_published_snapshot_status"),
+        Index("ix_published_snapshot_published_at", "published_at"),
+        Index("ix_published_snapshot_bucket", "bucket_key"),
     )
 
 

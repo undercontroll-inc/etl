@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+from datetime import timezone
 
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -15,10 +16,16 @@ logger = get_logger("scheduler")
 JOB_ID = "etl_mercado_livre"
 
 
+def build_trigger(expression: str) -> CronTrigger:
+    return CronTrigger.from_crontab(expression, timezone=timezone.utc)
+
+
 def execute_job() -> None:
     result = run_pipeline()
     if result.status == "SUCCESS":
         logger.info("Execução agendada concluída run_id=%s stats=%s", result.run_id, result.stats)
+    elif result.status == "PARTIAL":
+        logger.warning("Execução agendada parcial run_id=%s qualidade=%s", result.run_id, result.quality_report)
     else:
         logger.error("Execução agendada falhou run_id=%s erro=%s", result.run_id, result.error_message)
 
@@ -33,14 +40,14 @@ def main() -> int:
     setup_logging(settings.etl.log_level)
 
     try:
-        trigger = CronTrigger.from_crontab(settings.schedule_cron)
+        trigger = build_trigger(settings.schedule_cron)
     except ValueError as exc:
         print(f"ETL_SCHEDULE_CRON inválido ({settings.schedule_cron!r}): {exc}", file=sys.stderr)
         return 2
 
     init_schema()
 
-    scheduler = BlockingScheduler(timezone="UTC")
+    scheduler = BlockingScheduler(timezone=timezone.utc)
     scheduler.add_job(
         execute_job,
         trigger=trigger,

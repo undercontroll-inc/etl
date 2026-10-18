@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -9,9 +8,10 @@ from ml_etl.api.http_client import ApiError
 from ml_etl.api.mercado_livre import MercadoLivreApi
 from ml_etl.config import Settings, get_settings
 from ml_etl.domain.attributes import build_product_key, extract_attributes, slugify
-from ml_etl.domain.rejection import MISSING_ENRICHMENT, Layer, Rejection, Severity, Stage
+from ml_etl.domain.numbers import as_float, as_int
+from ml_etl.domain.rejection import MISSING_ENRICHMENT, Layer, Rejection, Stage
 from ml_etl.logging_config import get_logger
-from ml_etl.pipeline.extract import STAGE_ENRICH, RawPayload
+from ml_etl.pipeline.extract import STAGE_ENRICH, RawPayload, run_parallel
 from ml_etl.pipeline.offers import ProductOffers
 
 logger = get_logger(__name__)
@@ -64,24 +64,6 @@ class EnrichResult:
         self.categories.update(other.categories)
 
 
-def _as_float(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        return float(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _as_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
 def entity_from_body(external_type: str, external_id: str, body: dict[str, Any], partial: bool) -> EnrichedEntity:
     title = body.get("title") or body.get("name") or ""
     attributes = body.get("attributes") or []
@@ -91,10 +73,10 @@ def entity_from_body(external_type: str, external_id: str, body: dict[str, Any],
     parsed = extract_attributes(attributes, fallback_brand=body.get("brand"))
     domain_id = body.get("domain_id")
 
-    price = _as_float(body.get("price"))
+    price = as_float(body.get("price"))
     if price is None:
         buy_box = body.get("buy_box_winner") or {}
-        price = _as_float(buy_box.get("price"))
+        price = as_float(buy_box.get("price"))
 
     return EnrichedEntity(
         external_type=external_type,
@@ -113,7 +95,7 @@ def entity_from_body(external_type: str, external_id: str, body: dict[str, Any],
         capacity_unit=parsed.capacity_unit,
         energy_efficiency=parsed.energy_efficiency,
         price=price,
-        available_quantity=_as_int(body.get("available_quantity")),
+        available_quantity=as_int(body.get("available_quantity")),
         condition=body.get("condition") or body.get("status"),
         permalink=body.get("permalink"),
         attributes=attributes,
@@ -131,11 +113,10 @@ def apply_offers(entity: EnrichedEntity, offers: ProductOffers | None) -> Enrich
 
 
 def _missing_rejection(external_type: str, external_id: str, detail: str) -> Rejection:
-    return Rejection(
+    return Rejection.warning(
         stage=Stage.ENRICH,
         layer=Layer.INTEGRIDADE,
         rule=MISSING_ENRICHMENT,
-        severity=Severity.AVISO,
         external_type=external_type,
         external_id=external_id,
         detail=detail,
@@ -189,11 +170,7 @@ def _enrich_items(api: MercadoLivreApi, item_ids: Sequence[str]) -> EnrichResult
 
 def _enrich_single(api: MercadoLivreApi, external_type: str, external_id: str) -> EnrichResult:
     result = EnrichResult()
-    fetcher = {
-        TYPE_PRODUCT: api.get_product,
-        TYPE_USER_PRODUCT: api.get_user_product,
-        TYPE_ITEM: api.get_item,
-    }[external_type]
+    fetcher = api.get_product if external_type == TYPE_PRODUCT else api.get_user_product
 
     try:
         response = fetcher(external_id)
@@ -238,15 +215,8 @@ def enrich_entities(
 
     result.merge(_enrich_items(api, item_ids))
 
-    if singles:
-        workers = min(active.etl.max_workers, len(singles))
-        if workers <= 1:
-            for external_type, external_id in singles:
-                result.merge(_enrich_single(api, external_type, external_id))
-        else:
-            with ThreadPoolExecutor(max_workers=workers) as pool:
-                for partial in pool.map(lambda key: _enrich_single(api, key[0], key[1]), singles):
-                    result.merge(partial)
+    for partial in run_parallel(singles, lambda key: _enrich_single(api, key[0], key[1]), active.etl.max_workers):
+        result.merge(partial)
 
     logger.info(
         "ENRICH: %s entidades enriquecidas, %s rejeicoes, %s payloads",
@@ -255,6 +225,29 @@ def enrich_entities(
         len(result.payloads),
     )
     return result
+
+
+def category_row(category_id: str, body: dict[str, Any]) -> dict[str, Any]:
+    path = body.get("path_from_root") or []
+    return {
+        "category_id": category_id,
+        "name": str(body.get("name") or category_id)[:255],
+        "parent_id": path[-2].get("id") if len(path) > 1 else None,
+        "path_from_root": path,
+        "total_items": as_int(body.get("total_items_in_this_category")),
+        "permalink": body.get("permalink"),
+    }
+
+
+def categories_from_raw(payloads: Sequence[RawPayload]) -> dict[str, dict[str, Any]]:
+    categories: dict[str, dict[str, Any]] = {}
+    for payload in payloads:
+        if not payload.endpoint.startswith("/categories/") or not isinstance(payload.payload, dict):
+            continue
+        category_id = payload.payload.get("id")
+        if category_id:
+            categories[category_id] = category_row(category_id, payload.payload)
+    return categories
 
 
 def resolve_categories(
@@ -277,27 +270,10 @@ def resolve_categories(
             logger.warning("Falha ao resolver categoria %s: %s", category_id, exc)
             return category_id, None
 
-    workers = min(active.etl.max_workers, len(pending))
-    if workers <= 1:
-        responses = [worker(cid) for cid in pending]
-    else:
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            responses = list(pool.map(worker, pending))
-
-    for category_id, response in responses:
+    for category_id, response in run_parallel(pending, worker, active.etl.max_workers):
         if response is None or not response.payload or not isinstance(response.payload, dict):
             continue
-        body = response.payload
-        result.categories[category_id] = {
-            "category_id": category_id,
-            "name": str(body.get("name") or category_id)[:255],
-            "parent_id": (body.get("path_from_root") or [{}])[-2].get("id")
-            if len(body.get("path_from_root") or []) > 1
-            else None,
-            "path_from_root": body.get("path_from_root"),
-            "total_items": _as_int(body.get("total_items_in_this_category")),
-            "permalink": body.get("permalink"),
-        }
+        result.categories[category_id] = category_row(category_id, response.payload)
         result.payloads.append(
             RawPayload(
                 stage=STAGE_ENRICH,

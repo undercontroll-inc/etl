@@ -34,14 +34,14 @@ REGRAS INVIOLÁVEIS DE INTERPRETAÇÃO
    Busca crescente indica interesse, não faturamento.
 3. Preço é DISPERSÃO DE OFERTAS anunciadas para o mesmo produto de catálogo, não preço de
    venda realizado. `price_median` é a mediana dos anúncios ativos naquele mês.
-4. Só afirme variação de preço quando `previous_price_median` existir. Se o produto ou a
+4. Só afirme variação de preço quando `price_index_delta_pct` (categoria) ou `price_delta_pct` (produto) existir. Se o produto ou a
    categoria tiver apenas um bucket, declare explicitamente que ainda não há série
    histórica e não estime nada.
 5. Só afirme tendência de posição (subiu/caiu no ranking) quando `confidence = 'HIGH'` e
    `rank_delta` não for nulo. Com `confidence = 'LOW'`, trate como primeira observação.
-6. Não afirme movimento de preço de um produto com `offer_count < 3`: com poucas ofertas a
-   mediana oscila por ruído, não por mercado. Para agregados por categoria, exija
-   `product_count >= 2`.
+6. Não afirme movimento de preço de um produto com `valid_price_count < 3`: com poucos preços
+   a mediana oscila por ruído, não por mercado. Para categorias, exija `paired_count >= 2` e
+   `consecutive = true`. Quando `sample_complete = false`, a amostra não cobre todas as ofertas.
 7. Nunca invente marca, modelo, preço, categoria ou percentual que não esteja no payload.
    Se um campo vier nulo, diga "não disponível" em vez de estimar.
 8. Sempre que citar um número, ele deve ser rastreável a um campo do payload. Ao apresentar
@@ -57,11 +57,13 @@ afirmação deve vir acompanhada do dado que a sustenta.
 
 ## 2. Dicionário de dados
 
-O ETL entrega cinco views. O backend escolhe quais enviar conforme a pergunta.
+O ETL entrega cinco views de dados e `vw_market_published_snapshot`, que identifica o snapshot
+publicado. Todas as views de dados leem apenas esse snapshot. O backend escolhe quais enviar
+conforme a pergunta. O contrato formal está em [core-api-contract.md](core-api-contract.md).
 
-### 2.1 `vw_market_product_current` — foto do mês corrente, um produto por linha
+### 2.1 `vw_market_product_current` — foto do snapshot publicado, um produto por linha
 
-Base de tudo. Contém apenas o `bucket_key` mais recente.
+Base de tudo. Contém apenas o run publicado mais recente.
 
 | Campo | Significado |
 |---|---|
@@ -91,8 +93,11 @@ Base de tudo. Contém apenas o `bucket_key` mais recente.
 | `price_min` / `price_median` / `price_max` | Menor, mediana e maior preço entre as ofertas ativas do mesmo produto neste mês. |
 | `price_delta_pct` | Variação percentual da `price_median` contra o mês anterior **deste produto**. Nulo sem histórico. |
 | `discount_pct` | Desconto mediano ofertado, comparando preço cheio anunciado com preço vigente. |
-| `offer_count` | Quantos anúncios disputam este produto de catálogo. Proxy de intensidade de concorrência. |
-| `seller_count` | Quantos vendedores distintos. Menor que `offer_count` quando um vendedor tem vários anúncios. |
+| `available_offer_count` | Total de anúncios que a API informa para este produto de catálogo. Proxy de intensidade de concorrência. Nulo quando a API não informa. |
+| `observed_offer_count` | Quantos anúncios o ETL efetivamente leu. Pode ser menor que o total. |
+| `valid_price_count` | Quantos anúncios observados têm preço válido. É a base da mediana. |
+| `sample_complete` | `true` quando todos os anúncios disponíveis foram observados. |
+| `observed_seller_count` | Vendedores distintos entre os anúncios observados. |
 | `relevance` | 0 a 1, quão confiante o ETL está de que isto é um eletrodoméstico de pequeno porte. |
 | `domain_reason` | Por que foi classificado assim. Ver seção 3. |
 | `permalink` | Link público do produto. |
@@ -112,7 +117,7 @@ Uma linha por `domain_id` por `bucket_key`.
 | `avg_score` / `max_score` | Nota média e melhor nota da categoria. |
 | `avg_price_median` | Preço mediano médio dos produtos da categoria. |
 | `price_floor` / `price_ceiling` | Menor e maior preço observados na categoria. |
-| `avg_offer_count` | Concorrência média por produto. |
+| `avg_valid_price_count` | Média de preços válidos por produto, usada para calibrar a confiança das medianas. |
 | `avg_price_delta_pct` | Variação média de preço contra o mês anterior. **É a base do insight de alta ou queda por categoria.** |
 | `avg_discount_pct` | Desconto médio praticado. Alto indica pressão competitiva. |
 | `rising_count` / `falling_count` | Quantos produtos subiram e quantos caíram no ranking. |
@@ -124,18 +129,21 @@ Uma linha por `brand_slug` por `bucket_key`: `product_count`, `domain_count` (em
 
 Atenção: `domain_count` pode vir `0` quando os produtos daquela marca são `ITEM` ou `USER_PRODUCT`, que não têm `domain_id`. Isso significa "não classificado", não "nenhuma categoria".
 
-### 2.5 `vw_market_price_movement` — série de preço mês a mês por categoria
+### 2.5 `vw_market_price_movement` — índice de preço por categoria
 
-A view que sustenta afirmações do tipo "categoria X subiu Y%".
+A view que sustenta afirmações do tipo "categoria X subiu Y%". Compara somente produtos
+presentes nos dois períodos (mesmo produto e mesma moeda), então mudanças na composição do
+ranking não movem o índice. Uma linha por `domain_id` do snapshot publicado.
 
 | Campo | Significado |
 |---|---|
 | `domain_id` | Tipo de aparelho. |
-| `bucket_key` / `previous_bucket_key` | Mês atual e mês da comparação. |
-| `avg_price_median` / `previous_price_median` | Preço mediano médio agora e no mês anterior. |
-| `price_delta_pct` | Variação percentual entre os dois. Nulo no primeiro mês da série. |
-| `offer_count` / `offer_delta_pct` | Total de ofertas e sua variação. Crescimento de ofertas com queda de preço indica entrada de concorrentes. |
-| `product_count` | Quantos produtos compõem a média. Abaixo de 2, não afirme tendência. |
+| `bucket_key` / `previous_bucket_key` | Período atual e período comparado (nulo sem histórico). |
+| `consecutive` | `true` quando o período comparado é exatamente o anterior. Sem isso, não fale em "mês a mês". |
+| `paired_count` | Produtos presentes nos dois períodos. Abaixo de 2, não afirme tendência. |
+| `current_product_count` / `previous_product_count` | Produtos com preço em cada período. |
+| `current_cohort_median` / `previous_cohort_median` | Mediana de preço dos produtos pareados em cada período. |
+| `price_index_delta_pct` | Mediana das variações percentuais por produto pareado. Nulo sem pares. |
 
 ---
 
@@ -186,14 +194,14 @@ Produtos rejeitados não chegam nas views. Ficam registrados em `etl_rejection` 
 Para cada um, a view de origem e a condição mínima para afirmar.
 
 ### 4.1 Alta ou queda de preço por categoria
-Fonte: `vw_market_price_movement`. Ordene por `price_delta_pct`.
+Fonte: `vw_market_price_movement`.
 
-Exige `previous_price_median` não nulo e `product_count >= 2`.
+Ordene por `price_index_delta_pct`. Exige `paired_count >= 2` e `consecutive = true`.
 
-> "Micro-ondas apresentaram a maior alta de preço (+11,1%) entre as categorias monitoradas, com o preço mediano saindo de R$ 539,10 em julho para R$ 599,00 em agosto, considerando 18 ofertas ativas."
+> "Micro-ondas apresentaram a maior alta de preço (+11,1%) entre as categorias monitoradas, considerando os mesmos produtos em julho e agosto (mediana de R$ 539,10 para R$ 599,00)."
 
 ### 4.2 Aumento de concorrência e oportunidade de estoque
-Fonte: `vw_market_price_movement` cruzando `price_delta_pct` negativo com `offer_delta_pct` positivo; ou `vw_market_category_summary` com `avg_discount_pct` alto.
+Fonte: `vw_market_price_movement` com `price_index_delta_pct` negativo cruzado com `vw_market_category_summary` com `avg_discount_pct` alto.
 
 > "Air Fryers têm o desconto médio mais agressivo do período (42,2%), com o líder do card saindo de R$ 899,00 para R$ 519,90. Preço cadente com desconto alto indica concorrência aquecida e janela de compra para estoque."
 
@@ -213,7 +221,7 @@ Fonte: `price_min`, `price_median`, `price_max` do mesmo produto. Amplitude larg
 > "O micro-ondas Electrolux ME23S é ofertado entre R$ 526,16 e R$ 641,90 pelos mesmos 18 anúncios, uma amplitude de 22% para o mesmo aparelho."
 
 ### 4.6 Concentração de concorrência
-Fonte: `offer_count` contra `seller_count`. Quando `offer_count` é muito maior que `seller_count`, poucos vendedores mantêm vários anúncios do mesmo produto.
+Fonte: `observed_offer_count` contra `observed_seller_count`. Quando há muito mais anúncios que vendedores na amostra, poucos vendedores mantêm vários anúncios do mesmo produto. Com `sample_complete = false`, trate como indício, não como total.
 
 ### 4.7 Perfil técnico da demanda
 Fonte: `power_watts`, `capacity_value`, `capacity_unit`, `voltage`, `energy_efficiency` agrupados por `domain_id`. Revela qual faixa de capacidade ou potência domina o ranking, o que informa quais peças de reposição vale estocar.
@@ -276,13 +284,13 @@ Peça este formato ao final do prompt do usuário:
   "insights": [
     {
       "titulo": "Micro-ondas lideram a alta de preço do período",
-      "texto": "Micro-ondas apresentaram a maior alta de preço (+11,1%) entre as categorias monitoradas, com preço mediano saindo de R$ 539,10 para R$ 599,00 sobre 18 ofertas ativas.",
+      "texto": "Micro-ondas apresentaram a maior alta de preço (+11,1%) entre as categorias monitoradas, com preço mediano saindo de R$ 539,10 para R$ 599,00 considerando os mesmos produtos nos dois meses.",
       "tipo": "PRECO_ALTA",
       "categoria": "MLB-MICROWAVES",
       "categoria_nome": "Micro-ondas",
       "evidencia": {
         "view": "vw_market_price_movement",
-        "campos": { "price_delta_pct": 11.11, "avg_price_median": 599.0, "previous_price_median": 539.1, "offer_count": 18, "product_count": 2 }
+        "campos": { "price_index_delta_pct": 11.11, "current_cohort_median": 599.0, "previous_cohort_median": 539.1, "paired_count": 2, "consecutive": true }
       },
       "confianca": "HIGH",
       "relacao_com_consertos": "NIVEL_1_EXATO",
@@ -347,38 +355,37 @@ Responda no formato JSON especificado.
 
 ## 8. Consultas de referência
 
-Prontas para o backend. Substitua `:bucket` pelo mês desejado.
+Prontas para o backend. As views já trazem só o snapshot publicado; `:bucket` é opcional.
 
 **Maiores altas e quedas de preço por categoria**
 ```sql
-SELECT domain_id, bucket_key, previous_bucket_key,
-       avg_price_median, previous_price_median, price_delta_pct,
-       offer_count, offer_delta_pct, product_count
+SELECT domain_id, bucket_key, previous_bucket_key, consecutive,
+       paired_count, current_cohort_median, previous_cohort_median, price_index_delta_pct
 FROM vw_market_price_movement
-WHERE bucket_key = :bucket
-  AND price_delta_pct IS NOT NULL
-  AND product_count >= 2
-ORDER BY price_delta_pct DESC;
+WHERE price_index_delta_pct IS NOT NULL
+  AND paired_count >= 2
+  AND consecutive
+ORDER BY price_index_delta_pct DESC;
 ```
 
 **Produtos em alta que o cliente já conserta** (`:domains` vem do catálogo do cliente)
 ```sql
 SELECT title, brand, model, category_name, domain_id,
        rank, rank_delta, score, price_median, price_delta_pct,
-       discount_pct, offer_count, confidence, product_key
+       discount_pct, valid_price_count, sample_complete, confidence, product_key
 FROM vw_market_rising_products
 WHERE domain_id IN (:domains)
 ORDER BY score DESC;
 ```
 
-**Oportunidade de estoque: preço caindo com concorrência subindo**
+**Oportunidade de estoque: preço caindo com desconto agressivo**
 ```sql
-SELECT domain_id, price_delta_pct, offer_delta_pct, avg_price_median
-FROM vw_market_price_movement
-WHERE bucket_key = :bucket
-  AND price_delta_pct < 0
-  AND offer_delta_pct > 0
-ORDER BY price_delta_pct ASC;
+SELECT m.domain_id, m.price_index_delta_pct, m.paired_count, c.avg_discount_pct
+FROM vw_market_price_movement m
+JOIN vw_market_category_summary c ON c.domain_id = m.domain_id AND c.bucket_key = m.bucket_key
+WHERE m.price_index_delta_pct < 0
+  AND m.paired_count >= 2
+ORDER BY m.price_index_delta_pct ASC;
 ```
 
 **Categorias em alta que o cliente ainda não atende**

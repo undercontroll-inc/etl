@@ -48,6 +48,17 @@ def _get_float(name: str, default: float) -> float:
         raise ConfigError(f"{name} deve ser um número, recebido {raw!r}") from exc
 
 
+def _get_bool(name: str, default: bool) -> bool:
+    raw = _get(name).lower()
+    if not raw:
+        return default
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ConfigError(f"{name} deve ser booleano, recebido {raw!r}")
+
+
 def _get_list(name: str, default: str = "") -> list[str]:
     raw = _get(name, default)
     return [part.strip() for part in raw.split(",") if part.strip()]
@@ -130,6 +141,7 @@ class EtlSettings:
     request_timeout: int
     max_retries: int
     log_level: str
+    offers_max_pages: int = 3
 
 
 @dataclass(frozen=True)
@@ -139,12 +151,22 @@ class ScoreSettings:
 
 
 @dataclass(frozen=True)
+class QualitySettings:
+    min_category_coverage: float = 0.5
+    min_curated_products: int = 1
+    warn_curated_products: int = 5
+    min_price_coverage: float = 0.5
+
+
+@dataclass(frozen=True)
 class Settings:
     mercado_livre: MercadoLivreSettings
     database: DatabaseSettings
     etl: EtlSettings
     score: ScoreSettings
     schedule_cron: str
+    quality: QualitySettings = field(default_factory=QualitySettings)
+    auto_publish: bool = True
 
 
 def load_settings(
@@ -185,12 +207,20 @@ def load_settings(
             request_timeout=_get_int("ETL_REQUEST_TIMEOUT", 30),
             max_retries=max(0, _get_int("ETL_MAX_RETRIES", 5)),
             log_level=_get("ETL_LOG_LEVEL", "INFO").upper(),
+            offers_max_pages=max(1, _get_int("ETL_OFFERS_MAX_PAGES", 3)),
         ),
         score=ScoreSettings(
             weights=_parse_weights(_get("SCORE_WEIGHTS")),
             priority_threshold=_get_float("SCORE_PRIORITY_THRESHOLD", 75.0),
         ),
         schedule_cron=_get("ETL_SCHEDULE_CRON", "0 3 1 * *"),
+        quality=QualitySettings(
+            min_category_coverage=_get_float("ETL_QUALITY_MIN_CATEGORY_COVERAGE", 0.5),
+            min_curated_products=max(0, _get_int("ETL_QUALITY_MIN_CURATED", 1)),
+            warn_curated_products=max(0, _get_int("ETL_QUALITY_WARN_CURATED", 5)),
+            min_price_coverage=_get_float("ETL_QUALITY_MIN_PRICE_COVERAGE", 0.5),
+        ),
+        auto_publish=_get_bool("ETL_AUTO_PUBLISH", True),
     )
 
 

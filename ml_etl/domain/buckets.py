@@ -8,6 +8,7 @@ RANK_BANDS = (
     (11, 20, "MODERADO"),
 )
 STRONG_GROWTH_THRESHOLD = 10
+RISING_TRAJECTORIES = ("CRESCIMENTO", "CRESCIMENTO_FORTE")
 
 
 def bucket_key_for(moment: datetime, granularity: str = "month") -> str:
@@ -46,12 +47,3 @@ def trajectory_label(rank_delta: int | None) -> str:
     if rank_delta == 0:
         return "ESTAVEL"
     return "QUEDA"
-
-
-def is_valid_bucket(bucket: str, granularity: str = "month") -> bool:
-    fmt = "%Y-%m-%d" if granularity == "day" else "%Y-%m"
-    try:
-        datetime.strptime(bucket, fmt)
-    except ValueError:
-        return False
-    return True

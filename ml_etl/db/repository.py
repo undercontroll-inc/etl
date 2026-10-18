@@ -15,7 +15,9 @@ from ml_etl.db.models import (
     MarketCategory,
     MarketCuratedProduct,
     MarketEntity,
+    MarketPriceMovement,
     MarketPriceObservation,
+    MarketPublishedSnapshot,
     MarketRawResponse,
     MarketScore,
     MarketSnapshot,
@@ -26,6 +28,12 @@ from ml_etl.logging_config import get_logger
 logger = get_logger(__name__)
 
 CHUNK_SIZE = 500
+
+
+class RunNotFoundError(LookupError):
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run_id {run_id} não encontrado")
+        self.run_id = run_id
 
 UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
     MarketCategory: (
@@ -59,22 +67,25 @@ UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
         ),
     ),
     MarketSnapshot: (
-        ("source", "external_type", "external_id", "category_id", "bucket_key"),
-        ("rank", "rank_band", "collected_at", "run_id", "updated_at"),
+        ("run_id", "source", "external_type", "external_id", "category_id"),
+        ("rank", "rank_band", "collected_at", "bucket_key", "updated_at"),
     ),
     MarketTrend: (
-        ("category_id", "keyword", "bucket_key"),
-        ("canonical_keyword", "url", "position", "collected_at", "run_id", "updated_at"),
+        ("run_id", "category_id", "keyword"),
+        ("canonical_keyword", "url", "position", "collected_at", "bucket_key", "updated_at"),
     ),
     MarketScore: (
-        ("external_type", "external_id", "bucket_key"),
-        ("score", "priority_label", "confidence", "components", "computed_at", "run_id", "updated_at"),
+        ("run_id", "external_type", "external_id"),
+        ("score", "priority_label", "confidence", "components", "computed_at", "bucket_key", "updated_at"),
     ),
     MarketPriceObservation: (
-        ("external_type", "external_id", "bucket_key"),
+        ("run_id", "external_type", "external_id"),
         (
-            "offer_count",
-            "seller_count",
+            "available_offer_count",
+            "observed_offer_count",
+            "valid_price_count",
+            "sample_complete",
+            "observed_seller_count",
             "official_store_count",
             "price_min",
             "price_p25",
@@ -83,17 +94,18 @@ UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "price_max",
             "original_price_median",
             "discount_pct_median",
-            "winner_item_id",
-            "winner_price",
+            "lowest_price_item_id",
+            "lowest_price",
             "currency_id",
             "category_id",
+            "domain_id",
             "collected_at",
-            "run_id",
+            "bucket_key",
             "updated_at",
         ),
     ),
     MarketCuratedProduct: (
-        ("source", "external_type", "external_id", "bucket_key"),
+        ("run_id", "source", "external_type", "external_id"),
         (
             "collected_at",
             "rank",
@@ -121,14 +133,33 @@ UPSERT_SPECS: dict[Any, tuple[tuple[str, ...], tuple[str, ...]]] = {
             "price_max",
             "price_delta_pct",
             "discount_pct",
-            "offer_count",
-            "seller_count",
+            "available_offer_count",
+            "observed_offer_count",
+            "valid_price_count",
+            "sample_complete",
+            "observed_seller_count",
             "relevance",
             "domain_reason",
             "permalink",
             "priority_label",
             "confidence",
-            "run_id",
+            "bucket_key",
+            "updated_at",
+        ),
+    ),
+    MarketPriceMovement: (
+        ("run_id", "domain_id"),
+        (
+            "bucket_key",
+            "previous_bucket_key",
+            "previous_run_id",
+            "consecutive",
+            "paired_count",
+            "current_product_count",
+            "previous_product_count",
+            "current_cohort_median",
+            "previous_cohort_median",
+            "price_index_delta_pct",
             "updated_at",
         ),
     ),
@@ -205,12 +236,14 @@ def finish_run(
     status: str,
     stats: dict[str, Any] | None = None,
     error_message: str | None = None,
+    quality_report: dict[str, Any] | None = None,
 ) -> None:
     run = session.get(EtlRun, run_id)
     if run is None:
-        return
+        raise RunNotFoundError(run_id)
     run.status = status
     run.stats = stats
+    run.quality_report = quality_report
     run.error_message = error_message
     run.finished_at = _utcnow()
     session.flush()
@@ -230,9 +263,29 @@ def fetch_raw_payloads(session: Session, run_id: str, stage: str | None = None) 
     return list(session.execute(stmt.order_by(MarketRawResponse.id)).scalars())
 
 
+def _previous_reference(session: Session, model: Any, bucket_key: str) -> tuple[str, str] | None:
+    stmt = (
+        select(model.bucket_key, model.run_id)
+        .join(MarketPublishedSnapshot, MarketPublishedSnapshot.run_id == model.run_id)
+        .where(model.bucket_key < bucket_key)
+        .order_by(
+            model.bucket_key.desc(),
+            MarketPublishedSnapshot.published_at.desc(),
+            MarketPublishedSnapshot.snapshot_id.desc(),
+        )
+        .limit(1)
+    )
+    row = session.execute(stmt).first()
+    return None if row is None else (row[0], row[1])
+
+
 def fetch_previous_snapshots(session: Session, bucket_key: str) -> list[MarketSnapshot]:
-    previous_bucket = select(func.max(MarketSnapshot.bucket_key)).where(MarketSnapshot.bucket_key < bucket_key)
-    stmt = select(MarketSnapshot).where(MarketSnapshot.bucket_key == previous_bucket.scalar_subquery())
+    reference = _previous_reference(session, MarketSnapshot, bucket_key)
+    if reference is None:
+        return []
+    stmt = select(MarketSnapshot).where(
+        MarketSnapshot.bucket_key == reference[0], MarketSnapshot.run_id == reference[1]
+    )
     return list(session.execute(stmt).scalars())
 
 
@@ -243,6 +296,7 @@ def count_prior_buckets(session: Session, bucket_key: str) -> dict[tuple[str, st
             MarketSnapshot.external_id,
             func.count(func.distinct(MarketSnapshot.bucket_key)),
         )
+        .join(MarketPublishedSnapshot, MarketPublishedSnapshot.run_id == MarketSnapshot.run_id)
         .where(MarketSnapshot.bucket_key < bucket_key)
         .group_by(MarketSnapshot.external_type, MarketSnapshot.external_id)
     )
@@ -250,15 +304,46 @@ def count_prior_buckets(session: Session, bucket_key: str) -> dict[tuple[str, st
 
 
 def fetch_previous_price_medians(session: Session, bucket_key: str) -> dict[tuple[str, str], float]:
-    previous_bucket = select(func.max(MarketPriceObservation.bucket_key)).where(
-        MarketPriceObservation.bucket_key < bucket_key
-    )
+    reference = _previous_reference(session, MarketPriceObservation, bucket_key)
+    if reference is None:
+        return {}
     stmt = select(
         MarketPriceObservation.external_type,
         MarketPriceObservation.external_id,
         MarketPriceObservation.price_median,
-    ).where(MarketPriceObservation.bucket_key == previous_bucket.scalar_subquery())
+    ).where(
+        MarketPriceObservation.bucket_key == reference[0],
+        MarketPriceObservation.run_id == reference[1],
+    )
     return {(row[0], row[1]): float(row[2]) for row in session.execute(stmt) if row[2] is not None}
+
+
+def fetch_previous_domain_prices(
+    session: Session, bucket_key: str, domains: Iterable[str]
+) -> dict[str, tuple[str, str, list[MarketPriceObservation]]]:
+    wanted = set(domains)
+    if not wanted:
+        return {}
+    stmt = (
+        select(MarketPriceObservation)
+        .join(MarketPublishedSnapshot, MarketPublishedSnapshot.run_id == MarketPriceObservation.run_id)
+        .where(
+            MarketPriceObservation.bucket_key < bucket_key,
+            MarketPriceObservation.domain_id.in_(wanted),
+            MarketPriceObservation.price_median.is_not(None),
+        )
+        .order_by(
+            MarketPriceObservation.bucket_key.desc(),
+            MarketPublishedSnapshot.published_at.desc(),
+            MarketPublishedSnapshot.snapshot_id.desc(),
+        )
+    )
+    history: dict[str, tuple[str, str, list[MarketPriceObservation]]] = {}
+    for row in session.execute(stmt).scalars():
+        reference = history.setdefault(row.domain_id, (row.bucket_key, row.run_id, []))
+        if (row.bucket_key, row.run_id) == reference[:2]:
+            reference[2].append(row)
+    return history
 
 
 def fetch_cached_categories(session: Session) -> dict[str, MarketCategory]:
@@ -268,6 +353,20 @@ def fetch_cached_categories(session: Session) -> dict[str, MarketCategory]:
 
 def get_run(session: Session, run_id: str) -> EtlRun | None:
     return session.get(EtlRun, run_id)
+
+
+def get_published_snapshot(session: Session, run_id: str) -> MarketPublishedSnapshot | None:
+    stmt = select(MarketPublishedSnapshot).where(MarketPublishedSnapshot.run_id == run_id)
+    return session.execute(stmt).scalar_one_or_none()
+
+
+def latest_published_snapshot(session: Session) -> MarketPublishedSnapshot | None:
+    stmt = (
+        select(MarketPublishedSnapshot)
+        .order_by(MarketPublishedSnapshot.published_at.desc(), MarketPublishedSnapshot.snapshot_id.desc())
+        .limit(1)
+    )
+    return session.execute(stmt).scalar_one_or_none()
 
 
 def recent_runs(session: Session, limit: int = 10) -> list[EtlRun]:
@@ -284,8 +383,10 @@ def table_counts(session: Session) -> dict[str, int]:
         MarketSnapshot,
         MarketTrend,
         MarketPriceObservation,
+        MarketPriceMovement,
         MarketScore,
         MarketCuratedProduct,
+        MarketPublishedSnapshot,
         EtlRejection,
     ]
     counts = {}

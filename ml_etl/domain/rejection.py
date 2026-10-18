@@ -7,12 +7,10 @@ from typing import Any
 
 class Stage(StrEnum):
     EXTRACT = "EXTRACT"
-    RAW = "RAW"
     ENRICH = "ENRICH"
     TRANSFORM = "TRANSFORM"
     FILTER = "FILTER"
     SCORE = "SCORE"
-    LOAD = "LOAD"
 
 
 class Layer(StrEnum):
@@ -41,6 +39,14 @@ class Rejection:
     external_id: str | None = None
     detail: str | None = None
     payload: dict[str, Any] | None = None
+
+    @classmethod
+    def blocking(cls, stage: Stage, layer: Layer, rule: str, **fields: Any) -> Rejection:
+        return cls(stage=stage, layer=layer, rule=rule, severity=Severity.BLOQUEANTE, **fields)
+
+    @classmethod
+    def warning(cls, stage: Stage, layer: Layer, rule: str, **fields: Any) -> Rejection:
+        return cls(stage=stage, layer=layer, rule=rule, severity=Severity.AVISO, **fields)
 
     def as_row(self, run_id: str) -> dict[str, Any]:
         return {
